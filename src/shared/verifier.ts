@@ -1,6 +1,7 @@
 import type {
   DiseaseMatchAudit,
   DosageAuditResult,
+  ExternalValidationSource,
   FacilityStockItem,
   LanguageCode,
   MechanismTargetId,
@@ -22,6 +23,7 @@ import {
   DOSE_RULES,
   ELDERLY_RISK_RULES,
   INDICATION_RULES,
+  INGREDIENT_REFERENCE_LINKS,
   INTERACTION_RULES,
   MECHANISM_TARGETS,
   REGULATOR_ALERTS,
@@ -167,15 +169,26 @@ export function retrieveRagMatches(
     const issues: string[] = [];
 
     if (refRecord.mg_per_kg_min && refRecord.mg_per_kg_max && weightValid && patientWeightKg) {
-      const minPerDose = Math.round(refRecord.mg_per_kg_min * patientWeightKg * 10) / 10;
-      const maxPerDose = Math.round(refRecord.mg_per_kg_max * patientWeightKg * 10) / 10;
+      const isDailyBasis = refRecord.reference_dose.toLowerCase().includes('/day');
+      const minVal = Math.round(refRecord.mg_per_kg_min * patientWeightKg * 10) / 10;
+      const maxVal = Math.round(refRecord.mg_per_kg_max * patientWeightKg * 10) / 10;
       const maxDoses = refRecord.max_doses_per_day ?? 4;
-      calculatedWeightDoseRange = `${minPerDose}–${maxPerDose} mg/dose (for ${patientWeightKg} kg; max ${maxDoses} doses/24h)`;
+      calculatedWeightDoseRange = isDailyBasis
+        ? `${minVal}–${maxVal} mg/day (for ${patientWeightKg} kg; ${maxDoses} divided doses/24h)`
+        : `${minVal}–${maxVal} mg/dose (for ${patientWeightKg} kg; max ${maxDoses} doses/24h)`;
 
-      if (item.strengthMg > maxPerDose) {
+      if (isDailyBasis) {
+        const dailyTotal = item.totalDailyMg || item.strengthMg * Math.max(1, item.frequencyPerDay);
+        if (dailyTotal > maxVal) {
+          exceedsWeightOrFreq = true;
+          issues.push(
+            `Daily dose ${dailyTotal} mg/day exceeds weight-based ceiling ${maxVal} mg/day for ${patientWeightKg} kg.`
+          );
+        }
+      } else if (item.strengthMg > maxVal) {
         exceedsWeightOrFreq = true;
         issues.push(
-          `Single dose ${item.strengthMg} mg exceeds weight-based ceiling ${maxPerDose} mg/dose for ${patientWeightKg} kg.`
+          `Single dose ${item.strengthMg} mg exceeds weight-based ceiling ${maxVal} mg/dose for ${patientWeightKg} kg.`
         );
       }
       if (item.frequencyPerDay > maxDoses) {
@@ -188,11 +201,42 @@ export function retrieveRagMatches(
       issues.push('Patient body weight (kg) not confirmed; pediatric dosing is weight-dependent.');
     }
 
+    const ageMonths = patientAge * 12;
+    const belowMinAgeMonths =
+      typeof refRecord.min_age_months === 'number' && ageMonths < refRecord.min_age_months;
+
+    if (belowMinAgeMonths && refRecord.min_age_months) {
+      exceedsWeightOrFreq = true;
+      issues.push(
+        `Patient age (${Math.round(ageMonths * 10) / 10} months) is below minimum formulary age threshold (${refRecord.min_age_months} months).`
+      );
+    }
+
+    const otherIngredients = items
+      .filter((other) => other.id !== item.id)
+      .flatMap((other) => [
+        ...other.activeIngredients.map(norm),
+        norm(other.brandName),
+      ]);
+    const combinedInteractions = Array.from(
+      new Set([...(refRecord.interactions ?? []), ...(unsafeRecord?.interactions ?? [])])
+    );
+    const matchedInteractions = combinedInteractions.filter((intr) => {
+      const nIntr = intr.toLowerCase();
+      return otherIngredients.some((other) => other.length >= 3 && nIntr.includes(other));
+    });
+    if (matchedInteractions.length > 0) {
+      issues.push(`Co-prescribed RAG interaction match: ${matchedInteractions.join('; ')}.`);
+    }
+
     const primaryIng = norm(item.activeIngredients[0] || item.brandName);
     const isContraindicatedByAge =
+      belowMinAgeMonths ||
       (primaryIng.includes('nimesulide') && patientAge < 12) ||
       primaryIng.includes('aspirin') ||
       (primaryIng.includes('metoclopramide') && patientAge <= 1) ||
+      (primaryIng.includes('ibuprofen') && ageMonths < 3) ||
+      (primaryIng.includes('cetirizine') && ageMonths < 24) ||
       (refRecord.id === 'rag-cough-cold-unsafe' && patientAge < 4);
 
     if (isContraindicatedByAge) {
@@ -200,15 +244,20 @@ export function retrieveRagMatches(
     }
 
     const activeTrigger =
-      isContraindicatedByAge || exceedsWeightOrFreq || unsafeRecord?.safety_status === 'CONTRAINDICATED' || unsafeRecord?.safety_status === 'RESTRICTED'
-        ? unsafeRecord
+      isContraindicatedByAge ||
+      exceedsWeightOrFreq ||
+      matchedInteractions.length > 0 ||
+      unsafeRecord?.safety_status === 'CONTRAINDICATED' ||
+      unsafeRecord?.safety_status === 'RESTRICTED'
+        ? unsafeRecord ?? refRecord
         : !weightValid || unsafeRecord
           ? unsafeRecord
           : undefined;
 
-    const warningBannerTitle = isContraindicatedByAge || activeTrigger?.safety_status === 'CONTRAINDICATED'
-      ? `DOSAGE SAFETY WARNING — PEDIATRIC CONTRAINDICATION (${refRecord.medicine_name})`
-      : `DOSAGE SAFETY WARNING — PEDIATRIC VERIFICATION REQUIRED (${refRecord.medicine_name})`;
+    const warningBannerTitle =
+      isContraindicatedByAge || activeTrigger?.safety_status === 'CONTRAINDICATED'
+        ? `DOSAGE SAFETY WARNING — PEDIATRIC CONTRAINDICATION (${refRecord.medicine_name})`
+        : `DOSAGE SAFETY WARNING — PEDIATRIC VERIFICATION REQUIRED (${refRecord.medicine_name})`;
 
     const warningSummary =
       issues.length > 0
@@ -257,22 +306,30 @@ export function auditItemDosage(
 
   const daily = item.totalDailyMg || item.strengthMg * Math.max(1, item.frequencyPerDay);
   const isElderly = patientAge >= 65;
-  const isPediatric = patientAge > 0 && patientAge < 18;
+  const isPediatric = patientAge >= 0 && patientAge < 18;
 
   if (isPediatric) {
-    const isContra =
-      (rule.ingredient === 'nimesulide' && patientAge < 12) ||
-      rule.ingredient === 'aspirin' ||
-      (rule.ingredient === 'metoclopramide' && patientAge <= 1) ||
-      ((rule.ingredient === 'chlorpheniramine' || rule.ingredient === 'phenylephrine') &&
-        patientAge < 4);
-
+    const ageMonths = patientAge * 12;
     const ragRef = RAG_CLINICAL_RECORDS.find(
       (r) => r.active_ingredient === rule.ingredient && r.safety_status === 'REFERENCE'
     );
+    const belowMinAge =
+      typeof ragRef?.min_age_months === 'number' && ageMonths < ragRef.min_age_months;
+
+    const isContra =
+      belowMinAge ||
+      (rule.ingredient === 'nimesulide' && patientAge < 12) ||
+      rule.ingredient === 'aspirin' ||
+      (rule.ingredient === 'metoclopramide' && patientAge <= 1) ||
+      (rule.ingredient === 'ibuprofen' && ageMonths < 3) ||
+      (rule.ingredient === 'cetirizine' && ageMonths < 24) ||
+      ((rule.ingredient === 'chlorpheniramine' || rule.ingredient === 'phenylephrine') &&
+        patientAge < 4);
+
+    const isDailyBasis = ragRef?.reference_dose.toLowerCase().includes('/day') ?? false;
     const weightNote =
       patientWeightKg && patientWeightKg > 0 && ragRef?.mg_per_kg_min && ragRef?.mg_per_kg_max
-        ? ` Weight-based reference for ${patientWeightKg} kg: ${Math.round(ragRef.mg_per_kg_min * patientWeightKg)}–${Math.round(ragRef.mg_per_kg_max * patientWeightKg)} mg/dose (max ${ragRef.max_doses_per_day ?? 4} doses/24h).`
+        ? ` Weight-based reference for ${patientWeightKg} kg: ${Math.round(ragRef.mg_per_kg_min * patientWeightKg)}–${Math.round(ragRef.mg_per_kg_max * patientWeightKg)} ${isDailyBasis ? 'mg/day' : 'mg/dose'} (max ${ragRef.max_doses_per_day ?? 4} doses/24h).`
         : '';
 
     return {
@@ -285,7 +342,7 @@ export function auditItemDosage(
       typicalRangeLabel: ragRef?.reference_dose ?? rule.typicalRangeLabel,
       status: isContra ? 'Pediatric Contraindication' : 'Pediatric Dose Review Required',
       criterionNote: isContra
-        ? `Patient age ${patientAge} (<18): ${rule.ingredient} carries a pediatric restriction/contraindication. Do not administer without specialist review.`
+        ? `Patient age ${patientAge} yrs (${Math.round(ageMonths)} mo): ${rule.ingredient} carries a pediatric age restriction or contraindication. Do not administer without specialist review.`
         : `Patient age ${patientAge} (<18): prescribed ${item.strengthMg} mg x ${item.frequencyPerDay}/day (${daily} mg/day) requires weight, formulation, and dosing-interval verification.${weightNote}`,
       source: ragRef?.source ?? rule.source,
       evidenceTier: 'Curated',
@@ -564,7 +621,7 @@ export function verifyPrescription(
   }
 
   // 5. Pediatric Regulatory & Formularies Restrictions (from RAG dataset)
-  if (patientAge > 0 && patientAge < 18) {
+  if (patientAge >= 0 && patientAge < 18) {
     for (const match of ragMatches) {
       const unsafe = match.triggeredUnsafeRecord;
       if (unsafe && (unsafe.safety_status === 'CONTRAINDICATED' || unsafe.safety_status === 'RESTRICTED')) {
@@ -639,6 +696,93 @@ export function verifyPrescription(
     primaryMechanismId = 'HERG';
   }
 
+  // Build deduplicated external validation sources grounded in FDA DailyMed, RCSB PDB, Mol* AlphaFold DB, and CDSCO/WHO
+  const sourceMap = new Map<string, ExternalValidationSource>();
+  const addSource = (src: ExternalValidationSource) => {
+    if (!sourceMap.has(src.url)) {
+      sourceMap.set(src.url, src);
+    }
+  };
+
+  for (const ing of allIngredients) {
+    const direct = INGREDIENT_REFERENCE_LINKS[ing];
+    if (direct) {
+      addSource({
+        id: `ing-${ing}`,
+        title: direct.title,
+        category: direct.category,
+        url: direct.url,
+        relevance: direct.relevance,
+      });
+    } else {
+      const matchedKey = Object.keys(INGREDIENT_REFERENCE_LINKS).find((k) => ing.includes(k));
+      if (matchedKey) {
+        const ref = INGREDIENT_REFERENCE_LINKS[matchedKey];
+        addSource({
+          id: `ing-${matchedKey}`,
+          title: ref.title,
+          category: ref.category,
+          url: ref.url,
+          relevance: ref.relevance,
+        });
+      }
+    }
+  }
+
+  for (const p of packChecks) {
+    if (p.tier !== 'Not found' && p.sourceUrl) {
+      addSource({
+        id: `pack-${p.alertId || p.itemId}`,
+        title: `${p.agency} Alert ${p.alertId}: ${p.productName}`,
+        category: 'Regulatory / Formulary',
+        url: p.sourceUrl,
+        relevance: p.reason || 'Official regulator batch/recall notice.',
+      });
+    }
+  }
+
+  for (const m of ragMatches) {
+    const rec = m.triggeredUnsafeRecord ?? m.matchedRecord;
+    addSource({
+      id: `rag-${rec.id}`,
+      title: `${rec.source} (${rec.medicine_name})`,
+      category: 'Regulatory / Formulary',
+      url: rec.source_url,
+      relevance: rec.reference_dose,
+    });
+  }
+
+  const mechTarget = MECHANISM_TARGETS[primaryMechanismId];
+  addSource({
+    id: `pdb-${mechTarget.id}`,
+    title: `RCSB PDB Structure: ${mechTarget.structureId.split('·')[0].trim()} (${mechTarget.name})`,
+    category: 'RCSB PDB Structure',
+    url: mechTarget.rcsbStructureUrl,
+    relevance: `${mechTarget.resolutionOrConfidence} — experimental active-site structure.`,
+  });
+  addSource({
+    id: `afdb-${mechTarget.id}`,
+    title: `Mol* AlphaFold DB 3D Viewer: ${mechTarget.gene}`,
+    category: 'Mol* AlphaFold DB',
+    url: mechTarget.alphafoldViewerUrl,
+    relevance: `Full-length AlphaFold structural context inside ${mechTarget.cellularOrganelle}.`,
+  });
+  if (mechTarget.dailymedUrl && mechTarget.dailymedLabel) {
+    addSource({
+      id: `dailymed-${mechTarget.id}`,
+      title: mechTarget.dailymedLabel,
+      category: 'FDA DailyMed Label',
+      url: mechTarget.dailymedUrl,
+      relevance: `Official FDA labeling & drug interaction reference linked to ${mechTarget.id}.`,
+    });
+  }
+
+  const validationSources = Array.from(sourceMap.values());
+  const citedTitles = validationSources.map((s) => s.title).slice(0, 4).join('; ');
+  if (citedTitles) {
+    verdictQualifier = `${verdictQualifier} Sources cited: ${citedTitles}.`;
+  }
+
   return {
     overallVerdict,
     verdictHeadline,
@@ -653,6 +797,7 @@ export function verifyPrescription(
     regimenFindings,
     ragMatches,
     primaryMechanismId,
+    validationSources,
     summaryStats: {
       packAlerts,
       dosageIssues,
@@ -825,12 +970,14 @@ export function buildDeterministicExplanation(
     .forEach((d) => issuesEn.push(`${d.brandName}: ${d.criterionNote}`));
   report.regimenFindings.forEach((f) => issuesEn.push(`${f.title}.`));
 
+  const sourceNames = (report.validationSources ?? []).map((s) => `${s.title} (${s.url})`).join('; ');
+
   const summaryExplanation =
     issuesEn.length > 0
-      ? `${report.verdictHeadline}. Verified findings: ${issuesEn.join(' ')}`
-      : `${report.verdictHeadline}. Every prescribed medicine matches "${report.patientCondition}", stays within safe daily dosage limits, and shows no regulator alerts or drug clashes as of ${report.asOfDate}.`;
+      ? `${report.verdictHeadline}. Verified findings: ${issuesEn.join(' ')}${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`
+      : `${report.verdictHeadline}. Every prescribed medicine matches "${report.patientCondition}", stays within safe daily dosage limits, and shows no regulator alerts or drug clashes as of ${report.asOfDate}.${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`;
 
-  const cellularAlphaFoldNote = `Inside the Cell & AlphaFold (${mech.structureId}, ${mech.provenance}): ${mech.name} operates inside the ${mech.cellularOrganelle}. ${mech.explanationSummary} ${mech.clinicalImplication}`;
+  const cellularAlphaFoldNote = `Inside the Cell & AlphaFold (${mech.structureId}, ${mech.provenance}): ${mech.name} operates inside the ${mech.cellularOrganelle}. ${mech.explanationSummary} ${mech.clinicalImplication} Primary structure links: ${mech.rcsbStructureUrl} and ${mech.alphafoldViewerUrl}.`;
 
   return {
     language: 'en',

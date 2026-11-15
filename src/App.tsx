@@ -6,6 +6,7 @@ import { FacilityWatchlist } from './components/FacilityWatchlist.tsx';
 import { HomePage, type AppPage } from './components/HomePage.tsx';
 import { LoginPage } from './components/LoginPage.tsx';
 import { MechanismLens3D } from './components/MechanismLens3D.tsx';
+import { MedicationDatabasePage } from './components/MedicationDatabasePage.tsx';
 import { PharmacistQueue } from './components/PharmacistQueue.tsx';
 import { PrescriptionWorkspace } from './components/PrescriptionWorkspace.tsx';
 import { TestCasesPage } from './components/TestCasesPage.tsx';
@@ -274,6 +275,7 @@ export default function App() {
     ['home', 'Home'],
     ['scan', 'Scan Here'],
     ['test-cases', 'Test Cases'],
+    ['formulary', 'Pediatric RAG DB'],
     ['cell', 'Cell 3D'],
     ['mechanism', 'AlphaFold 3D'],
   ];
@@ -282,6 +284,7 @@ export default function App() {
     home: 'Home',
     scan: 'Scan Here',
     'test-cases': 'Test Cases',
+    formulary: 'Pediatric Medication RAG DB',
     cell: 'Cell Structure 3D',
     mechanism: 'AlphaFold 3D',
     facility: 'Facility Watchlist',
@@ -350,6 +353,7 @@ export default function App() {
               ['home', 'Home'],
               ['scan', 'Scan Here'],
               ['test-cases', 'Test Cases'],
+              ['formulary', 'RAG DB'],
               ['cell', 'Cell 3D'],
               ['mechanism', 'AlphaFold 3D'],
               ['facility', 'Facility'],
@@ -492,6 +496,7 @@ export default function App() {
             onOpenMechanism={openMechanism}
             onOpenCellView={() => setActivePage('cell')}
             onOpenTestCases={() => setActivePage('test-cases')}
+            onOpenFormulary={() => setActivePage('formulary')}
           />
         )}
 
@@ -499,6 +504,15 @@ export default function App() {
           <TestCasesPage
             language={language}
             onSelectPreset={handleSelectTestCase}
+            onOpenScanner={() => setActivePage('scan')}
+          />
+        )}
+
+        {activePage === 'formulary' && (
+          <MedicationDatabasePage
+            language={language}
+            onSelectPreset={handleSelectTestCase}
+            onOpenMechanism={openMechanism}
             onOpenScanner={() => setActivePage('scan')}
           />
         )}

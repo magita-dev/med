@@ -614,6 +614,10 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'When CYP3A4 is blocked, simvastatin accumulates in blood and skeletal muscle mitochondria, triggering severe muscle breakdown risk.',
     accentHex: '#38bdf8',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=P08684',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/1TQN',
+    dailymedUrl: 'https://dailymed.nlm.nih.gov/dailymed/fda/fdaDrugXsl.cfm?setid=d0a66646-6774-4fc6-9b26-a98c3a5df274&type=display',
+    dailymedLabel: 'NIH DailyMed FDA Label: Clarithromycin Tablets (setid d0a66646-6774-4fc6-9b26-a98c3a5df274)',
   },
   CYP2D6: {
     id: 'CYP2D6',
@@ -640,6 +644,8 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'Genetic poor-metabolisers or drug-inhibited CYP2D6 lose analgesic effect from codeine or accumulate beta-blockers.',
     accentHex: '#a78bfa',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=P10635',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/2F9Q',
   },
   HERG: {
     id: 'HERG',
@@ -666,6 +672,8 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'Delayed cardiac repolarisation prolongs the QT interval and can trigger dangerous ventricular arrhythmias.',
     accentHex: '#fb7185',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=Q12809',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/5VA2',
   },
   PGP: {
     id: 'PGP',
@@ -692,6 +700,8 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'Inhibiting P-gp stops intestinal efflux, causing higher systemic absorption of co-administered substrates.',
     accentHex: '#34d399',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=P08183',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/6C0V',
   },
   AMPK: {
     id: 'AMPK',
@@ -718,6 +728,8 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'Explains how metformin lowers fasting blood glucose at therapeutic doses without causing hypoglycemia.',
     accentHex: '#10b981',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=Q13131',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/4RER',
   },
   COX2: {
     id: 'COX2',
@@ -744,6 +756,68 @@ export const MECHANISM_TARGETS: Record<MechanismTargetId, MechanismTarget> = {
     clinicalImplication:
       'Effective for inflammation, but in kidneys and stomach lining this same block reduces protective prostaglandins.',
     accentHex: '#f59e0b',
+    alphafoldViewerUrl: 'https://molstar.org/viewer/?afdb=P35354',
+    rcsbStructureUrl: 'https://www.rcsb.org/structure/5KIR',
+  },
+};
+
+export const INGREDIENT_REFERENCE_LINKS: Record<
+  string,
+  { title: string; category: 'FDA DailyMed Label' | 'Regulatory / Formulary'; url: string; relevance: string }
+> = {
+  clarithromycin: {
+    title: 'NIH DailyMed FDA Label: Clarithromycin Tablets (setid d0a66646-6774-4fc6-9b26-a98c3a5df274)',
+    category: 'FDA DailyMed Label',
+    url: 'https://dailymed.nlm.nih.gov/dailymed/fda/fdaDrugXsl.cfm?setid=d0a66646-6774-4fc6-9b26-a98c3a5df274&type=display',
+    relevance: 'FDA dosing, indications, and CYP3A4 contraindicated drug interaction labeling for Clarithromycin.',
+  },
+  simvastatin: {
+    title: 'NIH DailyMed Search: Simvastatin Prescribing Information (§2 & §4 Contraindications)',
+    category: 'FDA DailyMed Label',
+    url: 'https://dailymed.nlm.nih.gov/dailymed/search.cfm?labeltype=all&query=simvastatin',
+    relevance: 'Statin dosing limits and strong CYP3A4 inhibitor contraindications.',
+  },
+  atorvastatin: {
+    title: 'NIH DailyMed Search: Atorvastatin Prescribing Information (§2.1 & §7 Interactions)',
+    category: 'FDA DailyMed Label',
+    url: 'https://dailymed.nlm.nih.gov/dailymed/search.cfm?labeltype=all&query=atorvastatin',
+    relevance: 'Dosage ceilings and CYP3A4/OATP1B1 interaction precautions.',
+  },
+  metformin: {
+    title: 'NIH DailyMed Search: Metformin Hydrochloride Prescribing Information (§2 & §5.1)',
+    category: 'FDA DailyMed Label',
+    url: 'https://dailymed.nlm.nih.gov/dailymed/search.cfm?labeltype=all&query=metformin',
+    relevance: 'Max daily dose limits and renal clearance precautions.',
+  },
+  paracetamol: {
+    title: 'CDSCO National AEFI Guidelines & DailyMed Acetaminophen Monograph',
+    category: 'Regulatory / Formulary',
+    url: 'https://cdsco.gov.in/',
+    relevance: 'Adult max daily ceiling (4000 mg/day) and pediatric 10–15 mg/kg/dose limits.',
+  },
+  ibuprofen: {
+    title: 'WHO Model Formulary for Children & DailyMed Ibuprofen Monograph',
+    category: 'Regulatory / Formulary',
+    url: 'https://iris.who.int/',
+    relevance: 'Pediatric >3 months age restriction, hydration check, and adult NSAID ceilings.',
+  },
+  amoxicillin: {
+    title: 'Indian Academy of Pediatrics (IAP) STG & WHO Essential Medicines Amoxicillin',
+    category: 'Regulatory / Formulary',
+    url: 'https://iapindia.org/',
+    relevance: 'Weight- and indication-based pediatric amoxicillin regimen guidance.',
+  },
+  azithromycin: {
+    title: 'NIH DailyMed Search: Azithromycin Prescribing Information',
+    category: 'FDA DailyMed Label',
+    url: 'https://dailymed.nlm.nih.gov/dailymed/search.cfm?labeltype=all&query=azithromycin',
+    relevance: 'Macrolide dosing and QT prolongation precaution guidance.',
+  },
+  domperidone: {
+    title: 'CDSCO & EMA Domperidone Safety Advisory',
+    category: 'Regulatory / Formulary',
+    url: 'https://cdsco.gov.in/',
+    relevance: 'Maximum daily dose limit (30 mg/day) and cardiac QT precaution.',
   },
 };
 
@@ -943,6 +1017,80 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
         batchNumber: 'SN26119',
         manufacturer: 'Centaur Pharma',
         rawLine: 'Syp Sinarest (Chlorpheniramine + Phenylephrine + Paracetamol) — 1-0-1 x 3 days',
+      },
+    ],
+  },
+  {
+    id: 'pediatric-amoxicillin-weight',
+    label: 'Pediatric Amoxicillin (Weight & Indication Check)',
+    subtitle: 'Age 4 yrs (16 kg): Mox 125 mg TDS + Ibuprofen 100 mg TID (IAP STG)',
+    patientCondition: 'Bacterial Otitis Media & Fever',
+    patientAge: 4,
+    rawPrescriptionText:
+      'Rx (Child 4 yrs, 16 kg):\n1. Syp Mox (Amoxicillin 125 mg/5 mL) 125 mg — 1-1-1 (TDS) x 5 days\n2. Syp Brufen (Ibuprofen 100 mg/5 mL) 100 mg — 1-1-1 SOS after food x 3 days',
+    items: [
+      {
+        id: 'item-1',
+        brandName: 'Mox Suspension',
+        activeIngredients: ['amoxicillin'],
+        strengthMg: 125,
+        frequencyPerDay: 3,
+        totalDailyMg: 375,
+        durationDays: 5,
+        route: 'Oral suspension (125 mg/5 mL)',
+        batchNumber: 'MX26105',
+        manufacturer: 'Sun Pharma',
+        rawLine: 'Syp Mox (Amoxicillin) 125 mg — 1-1-1 x 5 days',
+      },
+      {
+        id: 'item-2',
+        brandName: 'Brufen Junior',
+        activeIngredients: ['ibuprofen'],
+        strengthMg: 100,
+        frequencyPerDay: 3,
+        totalDailyMg: 300,
+        durationDays: 3,
+        route: 'Oral after food',
+        batchNumber: 'BR26018',
+        manufacturer: 'Abbott India',
+        rawLine: 'Syp Brufen (Ibuprofen) 100 mg — 1-1-1 SOS after food x 3 days',
+      },
+    ],
+  },
+  {
+    id: 'pediatric-contra-nimesulide',
+    label: 'Pediatric Contraindication: Nimesulide + Aspirin',
+    subtitle: 'Age 8 yrs: Nise 100 mg (CDSCO Ban <12y) + Disprin (Reye Syndrome Risk)',
+    patientCondition: 'Viral Fever and Body Pain',
+    patientAge: 8,
+    rawPrescriptionText:
+      'Rx (Child 8 yrs):\n1. Tab Nise (Nimesulide) 100 mg — 1-0-1 x 3 days\n2. Tab Disprin (Aspirin) 325 mg — 1 SOS for fever',
+    items: [
+      {
+        id: 'item-1',
+        brandName: 'Nise-100',
+        activeIngredients: ['nimesulide'],
+        strengthMg: 100,
+        frequencyPerDay: 2,
+        totalDailyMg: 200,
+        durationDays: 3,
+        route: 'Oral',
+        batchNumber: 'NS26040',
+        manufacturer: 'Dr. Reddys',
+        rawLine: 'Tab Nise (Nimesulide) 100 mg — 1-0-1 x 3 days',
+      },
+      {
+        id: 'item-2',
+        brandName: 'Disprin',
+        activeIngredients: ['aspirin'],
+        strengthMg: 325,
+        frequencyPerDay: 1,
+        totalDailyMg: 325,
+        durationDays: 2,
+        route: 'Oral',
+        batchNumber: 'DP26011',
+        manufacturer: 'Reckitt Benckiser',
+        rawLine: 'Tab Disprin (Aspirin) 325 mg — 1 SOS',
       },
     ],
   },

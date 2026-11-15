@@ -17,6 +17,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { DOSE_RULES, SAMPLE_PRESETS } from '../data/medguardCatalog.ts';
+import { getPediatricReferenceByMedicine } from '../data/medicationDatabase.ts';
 import { saveVerificationCheck } from '../firebase.ts';
 import { flagUnsafeDosagesByConditionAndAge } from '../utils/dosageHelper.ts';
 import type {
@@ -289,6 +290,7 @@ interface PrescriptionWorkspaceProps {
   onOpenMechanism: (targetId: MechanismTargetId) => void;
   onOpenCellView: () => void;
   onOpenTestCases?: () => void;
+  onOpenFormulary?: () => void;
 }
 
 const UI_TEXT: Record<
@@ -310,8 +312,8 @@ const UI_TEXT: Record<
   }
 > = {
   en: {
-    uploadTitle: 'Upload Prescription or Medicine Strip Photo',
-    uploadHint: 'Supports printed or handwritten prescriptions & blister packs. Or paste lines / load a sample below.',
+    uploadTitle: 'Upload Prescription Photo or Document (PDF / DOCX / TXT)',
+    uploadHint: 'Supports printed/handwritten photos, PDFs, Word (.docx), and text files. Or paste lines below.',
     conditionLabel: 'Diagnosed Disease / Condition',
     ageLabel: 'Patient Age (years)',
     extractBtn: 'Read & Translate Lines',
@@ -366,6 +368,7 @@ export function PrescriptionWorkspace({
   onOpenMechanism,
   onOpenCellView,
   onOpenTestCases,
+  onOpenFormulary,
 }: PrescriptionWorkspaceProps) {
   const t = UI_TEXT[language];
   const initial = selectedPreset?.preset ?? SAMPLE_PRESETS[0];
@@ -377,6 +380,7 @@ export function PrescriptionWorkspace({
   const [items, setItems] = useState<PrescriptionItem[]>(initial.items);
   const [confirmed, setConfirmed] = useState(true);
   const [previewUrl, setPreviewUrl] = useState<string>('');
+  const [uploadedDocName, setUploadedDocName] = useState<string>('');
 
   const [report, setReport] = useState<VerificationReport | null>(null);
   const [explanation, setExplanation] = useState<MultilingualExplanation | null>(null);
@@ -389,19 +393,25 @@ export function PrescriptionWorkspace({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const parsedAgeNum = Number(patientAge);
+  const effectiveAgeNum =
+    patientAge.trim() !== '' && Number.isFinite(parsedAgeNum) && parsedAgeNum >= 0
+      ? parsedAgeNum
+      : 45;
+
   const dosageEvaluation = useMemo(
     () =>
       evaluatePrescribedDosageAgainstGuidelines(
         items,
-        Number(patientAge) || 45,
+        effectiveAgeNum,
         language
       ),
-    [items, patientAge, language]
+    [items, effectiveAgeNum, language]
   );
 
   const dosageExceedances = useMemo(
-    () => validateDetectedDosages(items, Number(patientAge) || 45),
-    [items, patientAge]
+    () => validateDetectedDosages(items, effectiveAgeNum),
+    [items, effectiveAgeNum]
   );
 
   const conditionAgeEvaluation = useMemo(
@@ -409,11 +419,11 @@ export function PrescriptionWorkspace({
       flagUnsafeDosagesByConditionAndAge({
         items,
         patientCondition,
-        patientAge: Number(patientAge) || 45,
+        patientAge: effectiveAgeNum,
         patientWeightKg:
           Number(patientWeightKg) > 0 ? Number(patientWeightKg) : undefined,
       }),
-    [items, patientCondition, patientAge, patientWeightKg]
+    [items, patientCondition, effectiveAgeNum, patientWeightKg]
   );
 
   const triggerLocalExplanation = async (
@@ -450,10 +460,16 @@ export function PrescriptionWorkspace({
     const { preset, autoVerify } = selectedPreset;
     stopAudio();
     setPreviewUrl('');
+    setUploadedDocName('');
     setRawText(preset.rawPrescriptionText);
     setPatientCondition(preset.patientCondition);
     setPatientAge(String(preset.patientAge));
-    const defaultWeight = preset.id === 'pediatric-rag-caution' ? '14' : '';
+    const defaultWeight =
+      preset.id === 'pediatric-rag-caution'
+        ? '14'
+        : preset.id === 'pediatric-amoxicillin-weight'
+          ? '16'
+          : '';
     setPatientWeightKg(defaultWeight);
     const clonedItems = preset.items.map((x) => ({ ...x }));
     setItems(clonedItems);
@@ -548,68 +564,123 @@ export function PrescriptionWorkspace({
     setSaveState('idle');
     setRawText('');
     setItems([]);
+    setPreviewUrl('');
+    setUploadedDocName(file.name);
 
     try {
-      const reader = new FileReader();
-      const base64Full: string = await new Promise((resolve, reject) => {
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error('Failed to read image file'));
-        reader.readAsDataURL(file);
-      });
-      setPreviewUrl(base64Full);
-      const [header, base64Data] = base64Full.split(',');
-      const mimeType = header.match(/data:(.*?);/)?.[1] || file.type || 'image/jpeg';
+      const lowerName = file.name.toLowerCase();
+      const isPlainTextFile =
+        file.type.startsWith('text/') ||
+        file.type === 'application/json' ||
+        /\.(txt|csv|md|markdown|json|log)$/i.test(lowerName);
 
-      const res = await fetch('/api/prescription/ocr-parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64Data,
-          mimeType,
-          language,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Image recognition failed');
+      let data: {
+        items?: PrescriptionItem[];
+        extractedRawText?: string;
+        detectedCondition?: string;
+        detectedAge?: number;
+        detectedWeightKg?: number;
+        error?: string;
+      };
+
+      if (isPlainTextFile) {
+        const textContent = await file.text();
+        setRawText(textContent);
+        const res = await fetch('/api/prescription/ocr-parse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rawText: textContent,
+            fileName: file.name,
+            mimeType: file.type || 'text/plain',
+            language,
+          }),
+        });
+        data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Document parsing failed');
+      } else {
+        const reader = new FileReader();
+        const base64Full: string = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('Failed to read uploaded file'));
+          reader.readAsDataURL(file);
+        });
+
+        const [header, base64Data] = base64Full.split(',');
+        const inferredMime =
+          file.type ||
+          header.match(/data:(.*?);/)?.[1] ||
+          (lowerName.endsWith('.pdf')
+            ? 'application/pdf'
+            : lowerName.endsWith('.docx')
+              ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              : 'image/jpeg');
+
+        if (inferredMime.startsWith('image/') && !/\.(pdf|docx)$/i.test(lowerName)) {
+          setPreviewUrl(base64Full);
+        }
+
+        const res = await fetch('/api/prescription/ocr-parse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileBase64: base64Data,
+            imageBase64: base64Data,
+            mimeType: inferredMime,
+            fileName: file.name,
+            language,
+          }),
+        });
+        data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Document recognition failed');
+      }
 
       const extractedItems: PrescriptionItem[] = data.items ?? [];
       setItems(extractedItems);
       setRawText(data.extractedRawText || '');
 
-      const effectiveCondition = patientCondition.trim() || data.detectedCondition || '';
-      if (!patientCondition.trim() && data.detectedCondition) {
-        setPatientCondition(data.detectedCondition);
+      const effectiveCondition = data.detectedCondition?.trim() || patientCondition.trim() || '';
+      if (data.detectedCondition?.trim()) {
+        setPatientCondition(data.detectedCondition.trim());
       }
-      const effectiveAge =
-        Number(patientAge) > 0
+      const hasDetectedAge =
+        data.detectedAge !== undefined &&
+        Number.isFinite(Number(data.detectedAge)) &&
+        Number(data.detectedAge) >= 0;
+      const effectiveAge = hasDetectedAge
+        ? Number(data.detectedAge)
+        : patientAge.trim() !== '' && Number.isFinite(Number(patientAge)) && Number(patientAge) >= 0
           ? Number(patientAge)
-          : Number(data.detectedAge) > 0
-            ? Number(data.detectedAge)
-            : 45;
-      if (!patientAge && data.detectedAge) {
+          : 45;
+      if (hasDetectedAge) {
         setPatientAge(String(data.detectedAge));
       }
 
-      const effectiveWeight =
-        Number(patientWeightKg) > 0
+      const hasDetectedWeight =
+        data.detectedWeightKg !== undefined && Number(data.detectedWeightKg) > 0;
+      const effectiveWeight = hasDetectedWeight
+        ? Number(data.detectedWeightKg)
+        : Number(patientWeightKg) > 0
           ? Number(patientWeightKg)
-          : Number(data.detectedWeightKg) > 0
-            ? Number(data.detectedWeightKg)
-            : undefined;
-      if (!patientWeightKg && data.detectedWeightKg) {
+          : undefined;
+      if (hasDetectedWeight) {
         setPatientWeightKg(String(data.detectedWeightKg));
       }
 
       if (extractedItems.length === 0) {
         setConfirmed(false);
-        setError('No legible medicines were found in this image. Please upload a clearer photo or type the prescription lines.');
+        setError(
+          data.extractedRawText
+            ? 'Text was extracted from your document below, but no structured dosage lines were auto-detected. Edit the lines or add a medicine row on the right.'
+            : 'No legible text or medicines were found in this file. Please upload a clearer document/photo or paste the prescription text below.'
+        );
         return;
       }
 
       setConfirmed(true);
       await runVerification(extractedItems, effectiveCondition, effectiveAge, language, effectiveWeight);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to process image');
+      setError(e instanceof Error ? e.message : 'Unable to process document');
     } finally {
       setBusy(false);
     }
@@ -632,6 +703,19 @@ export function PrescriptionWorkspace({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Parsing failed');
       setItems(data.items ?? []);
+      if (data.detectedCondition?.trim()) {
+        setPatientCondition(data.detectedCondition.trim());
+      }
+      if (
+        data.detectedAge !== undefined &&
+        Number.isFinite(Number(data.detectedAge)) &&
+        Number(data.detectedAge) >= 0
+      ) {
+        setPatientAge(String(data.detectedAge));
+      }
+      if (data.detectedWeightKg !== undefined && Number(data.detectedWeightKg) > 0) {
+        setPatientWeightKg(String(data.detectedWeightKg));
+      }
       setConfirmed(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not parse prescription lines');
@@ -643,7 +727,11 @@ export function PrescriptionWorkspace({
   const handleVerify = async (overrideLang?: LanguageCode) => {
     if (!items.length) return;
     const activeLang = overrideLang ?? language;
-    const ageNum = Number(patientAge) || 45;
+    const parsedAge = Number(patientAge);
+    const ageNum =
+      patientAge.trim() !== '' && Number.isFinite(parsedAge) && parsedAge >= 0
+        ? parsedAge
+        : 45;
     const weightNum = Number(patientWeightKg) > 0 ? Number(patientWeightKg) : undefined;
 
     stopAudio();
@@ -789,6 +877,16 @@ export function PrescriptionWorkspace({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          {onOpenFormulary && (
+            <button
+              type="button"
+              onClick={onOpenFormulary}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#C6B69E] bg-[#FCF9F4] hover:bg-[#EFE7DA] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap"
+            >
+              <span>Pediatric RAG DB</span>
+              <ArrowRight className="w-3.5 h-3.5 text-[#556B22]" />
+            </button>
+          )}
           {onOpenTestCases && (
             <button
               type="button"
@@ -833,10 +931,11 @@ export function PrescriptionWorkspace({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/*,.pdf,.docx,.txt,.csv,.md,.json,.rtf,.html,.htm,.xml"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
+                  e.target.value = '';
                   if (f) void handleImageUpload(f);
                 }}
               />
@@ -847,11 +946,11 @@ export function PrescriptionWorkspace({
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#556B22] hover:bg-[#46591B] text-[#FCF9F4] text-xs font-semibold transition-colors disabled:opacity-50 whitespace-nowrap"
               >
                 <Upload className="w-4 h-4" />
-                {busy ? 'Reading Photo...' : 'Upload Prescription / Strip Photo'}
+                {busy ? 'Extracting Document...' : 'Upload Photo or Document (PDF / DOCX / TXT)'}
               </button>
             </div>
 
-            {previewUrl && (
+            {previewUrl ? (
               <div className="rounded-lg overflow-hidden border border-[#D5C8B4] bg-[#EFE7DA] max-h-48 flex items-center justify-center">
                 <img
                   src={previewUrl}
@@ -860,6 +959,13 @@ export function PrescriptionWorkspace({
                   className="max-h-48 object-contain"
                 />
               </div>
+            ) : (
+              uploadedDocName && (
+                <div className="rounded-lg border border-[#D5C8B4] bg-[#EFE7DA] px-3 py-2 text-xs font-mono text-[#1E221D] flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-[#556B22] shrink-0" />
+                  <span className="truncate">Document loaded: {uploadedDocName}</span>
+                </div>
+              )
             )}
 
             <div className="space-y-1.5">
@@ -896,6 +1002,7 @@ export function PrescriptionWorkspace({
                   type="number"
                   min={0}
                   max={120}
+                  step="0.1"
                   value={patientAge}
                   onChange={(e) => setPatientAge(e.target.value)}
                   className="w-full rounded-lg bg-[#FCF9F4] border border-[#C6B69E] px-3 py-2 text-sm font-mono text-[#1E221D] focus:outline-none focus:border-[#556B22]"
@@ -988,6 +1095,18 @@ export function PrescriptionWorkspace({
                           placeholder="active ingredient(s)"
                           className="w-full bg-[#F5EFE5] border border-[#D5C8B4] rounded px-2 py-0.5 text-[#29659B] font-mono text-[11px] focus:outline-none focus:border-[#29659B]"
                         />
+                        {effectiveAgeNum < 18 &&
+                          (() => {
+                            const pedRef = getPediatricReferenceByMedicine(
+                              item.activeIngredients[0] || item.brandName
+                            );
+                            if (!pedRef) return null;
+                            return (
+                              <div className="text-[10px] font-mono text-[#556B22] leading-snug pt-0.5">
+                                RAG Ref: {pedRef.reference_dose} · {pedRef.age_range}
+                              </div>
+                            );
+                          })()}
                       </td>
                       <td className="px-2.5 py-2">
                         <input
@@ -1225,6 +1344,63 @@ export function PrescriptionWorkspace({
             </div>
           </div>
 
+          {/* Validated Sources Grounding Final Safe / Unsafe Verdict */}
+          {report.validationSources && report.validationSources.length > 0 && (
+            <section
+              aria-label="Sources Grounding Final Validation Result"
+              className="organelle-panel rounded-xl p-4 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="text-[11px] font-mono text-[#29659B] font-semibold">
+                    VERIFIED EVIDENCE SOURCES · SAFE / UNSAFE VALIDATION
+                  </span>
+                  <h4 className="font-display text-base font-semibold text-[#1E221D]">
+                    Authoritative Sources Cited for This Final Result ({report.validationSources.length})
+                  </h4>
+                </div>
+                <span className="text-xs font-mono text-[#555A50]">
+                  Verdict:{' '}
+                  <strong
+                    className={
+                      report.overallVerdict === 'SAFE_TO_TAKE'
+                        ? 'text-[#245920]'
+                        : report.overallVerdict === 'CAUTION_REVIEW'
+                          ? 'text-[#875E0D]'
+                          : 'text-[#8B152A]'
+                    }
+                  >
+                    {report.overallVerdict === 'SAFE_TO_TAKE' ? 'SAFE' : 'UNSAFE / REVIEW REQUIRED'}
+                  </strong>
+                </span>
+              </div>
+
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {report.validationSources.map((src) => (
+                  <a
+                    key={src.id}
+                    href={src.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="organelle-subpanel rounded-lg p-3 hover:border-[#29659B] transition-colors flex flex-col justify-between gap-1.5 text-xs"
+                  >
+                    <div className="space-y-1">
+                      <div className="font-mono text-[10px] font-semibold text-[#556B22]">
+                        {src.category.toUpperCase()}
+                      </div>
+                      <div className="font-semibold text-[#1E221D] leading-snug">{src.title}</div>
+                      <p className="text-[#4F544C] leading-snug">{src.relevance}</p>
+                    </div>
+                    <div className="inline-flex items-center gap-1 font-mono text-[11px] text-[#29659B] pt-1">
+                      <span className="truncate">{src.url}</span>
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* Multilingual Translated Explanation + Voice + Doctor Questions */}
           {explanation && (
             <div className="grid lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] gap-5">
@@ -1334,6 +1510,9 @@ export function PrescriptionWorkspace({
                           <div className="text-sm font-semibold text-[#1E221D]">
                             {match.matchedRecord.medicine_name} ({match.brandName})
                           </div>
+                          <div className="text-[11px] text-[#4F544C]">
+                            Brands: {activeRec.brand_examples.join(', ')} · Evidence: {activeRec.evidence_level} · {activeRec.safety_status}
+                          </div>
                         </div>
                         <span className="text-xs font-medium px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
                           {isStop ? 'Pediatric Contraindication' : 'Verify Weight & Dose'}
@@ -1348,6 +1527,9 @@ export function PrescriptionWorkspace({
                           <div className="text-[#1E221D] font-medium mt-0.5">
                             {match.matchedRecord.reference_dose} ({match.matchedRecord.age_range})
                           </div>
+                          <div className="text-[11px] text-[#4F544C] mt-0.5">
+                            Route: {match.matchedRecord.route} · {match.matchedRecord.frequency}
+                          </div>
                           {match.calculatedWeightDoseRange && (
                             <div className="text-[#29659B] font-mono font-semibold text-[11px] mt-1">
                               Calc: {match.calculatedWeightDoseRange}
@@ -1355,8 +1537,37 @@ export function PrescriptionWorkspace({
                           )}
                         </div>
                         <div>
-                          <div className="text-[11px] font-mono text-[#555A50]">Maximum & Frequency</div>
-                          <div className="text-[#2B3028] mt-0.5">{match.matchedRecord.maximum}</div>
+                          <div className="text-[11px] font-mono text-[#555A50]">Weight Guidance & Maximum</div>
+                          <div className="text-[#2B3028] mt-0.5">{match.matchedRecord.weight_guidance}</div>
+                          <div className="text-[11px] text-[#555A50] mt-0.5">{match.matchedRecord.maximum}</div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 text-[11px] font-mono">
+                        <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
+                          Weight Check: {activeRec.requires_weight_check ? 'Required' : 'Age-Banded'}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
+                          Formulation Check: {activeRec.requires_formulation_check ? 'Required' : 'Standard'}
+                        </span>
+                      </div>
+
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
+                          <div className="text-[10px] font-mono text-[#8B152A] font-semibold">
+                            CONTRAINDICATIONS
+                          </div>
+                          <div className="text-[#3C4138]">
+                            {activeRec.contraindications.join(' · ')}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
+                          <div className="text-[10px] font-mono text-[#875E0D] font-semibold">
+                            INTERACTIONS
+                          </div>
+                          <div className="text-[#3C4138]">
+                            {activeRec.interactions.join(' · ')}
+                          </div>
                         </div>
                       </div>
 

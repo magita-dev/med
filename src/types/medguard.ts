@@ -157,6 +157,14 @@ export type OverallVerdictStatus =
   | 'CAUTION_REVIEW'
   | 'ACTION_REQUIRED';
 
+export interface ExternalValidationSource {
+  id: string;
+  title: string;
+  category: 'FDA DailyMed Label' | 'RCSB PDB Structure' | 'Mol* AlphaFold DB' | 'Regulatory / Formulary';
+  url: string;
+  relevance: string;
+}
+
 export interface VerificationReport {
   overallVerdict: OverallVerdictStatus;
   verdictHeadline: string;
@@ -171,6 +179,7 @@ export interface VerificationReport {
   regimenFindings: RegimenFinding[];
   ragMatches: RagRetrievedMatch[];
   primaryMechanismId: MechanismTargetId;
+  validationSources?: ExternalValidationSource[];
   summaryStats: {
     packAlerts: number;
     dosageIssues: number;
@@ -205,6 +214,10 @@ export interface MechanismTarget {
   explanationSummary: string;
   clinicalImplication: string;
   accentHex: string;
+  alphafoldViewerUrl: string;
+  rcsbStructureUrl: string;
+  dailymedUrl?: string;
+  dailymedLabel?: string;
 }
 
 export interface MultilingualExplanation {

@@ -19,6 +19,11 @@ import {
   reverseMatchFacilityStock,
   verifyPrescription,
 } from './src/shared/verifier.ts';
+import {
+  extractDocumentTextLocally,
+  extractPatientContextFromText,
+  parsePrescriptionLinesDeterministic,
+} from './src/server/documentExtractor.ts';
 import type {
   FacilityStockItem,
   LanguageCode,
@@ -46,225 +51,213 @@ function getAiClient(): GoogleGenAI | null {
   });
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // In-memory store for Facility Watchlist & Pharmacist-Only Hypothesis Queue
 let facilityStock: FacilityStockItem[] = [...INITIAL_FACILITY_STOCK];
 let pharmacistQueue: PharmacistHypothesis[] = [...INITIAL_PHARMACIST_HYPOTHESES];
 
-function parsePrescriptionLinesDeterministic(
-  rawText: string,
-  language: LanguageCode
-): PrescriptionItem[] {
-  const lines = rawText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !/^rx:?$/i.test(l));
-
-  const items: PrescriptionItem[] = [];
-  const freqMap: Record<string, number> = {
-    od: 1,
-    hs: 1,
-    stat: 1,
-    bd: 2,
-    bid: 2,
-    tds: 3,
-    tid: 3,
-    qid: 4,
-  };
-
-  lines.forEach((line, idx) => {
-    const cleaned = line
-      .replace(/^\d+[\).\s-]+/, '')
-      .replace(/^(tab|tablet|cap|capsule|syp|syrup|inj)\b\.?\s*/i, '')
-      .trim();
-
-    const strengthMatch = line.match(/(\d+(?:\.\d+)?)\s*(mg|mcg|g)\b/i);
-    let strengthMg = strengthMatch ? Number(strengthMatch[1]) : 500;
-    if (strengthMatch && strengthMatch[2].toLowerCase() === 'g') {
-      strengthMg *= 1000;
-    } else if (strengthMatch && strengthMatch[2].toLowerCase() === 'mcg') {
-      strengthMg *= 0.001;
-    }
-
-    let frequencyPerDay = 1;
-    const patternMatch = line.match(/\b(\d)\s*-\s*(\d)\s*-\s*(\d)(?:\s*-\s*(\d))?\b/);
-    if (patternMatch) {
-      frequencyPerDay =
-        Number(patternMatch[1]) +
-        Number(patternMatch[2]) +
-        Number(patternMatch[3]) +
-        (patternMatch[4] ? Number(patternMatch[4]) : 0);
-    } else {
-      const lower = line.toLowerCase();
-      for (const [abbr, count] of Object.entries(freqMap)) {
-        if (new RegExp(`\\b${abbr}\\b`, 'i').test(lower)) {
-          frequencyPerDay = count;
-          break;
-        }
-      }
-    }
-
-    const durMatch = line.match(/(?:x|for)\s*(\d+)\s*(days?|d|weeks?|wks?)/i);
-    const durationDays = durMatch
-      ? Number(durMatch[1]) * (durMatch[2].toLowerCase().startsWith('w') ? 7 : 1)
-      : 5;
-
-    const batchMatch = line.match(/batch[:\s#]*([A-Z0-9-]{4,})/i);
-    const batchNumber = batchMatch ? batchMatch[1] : '';
-
-    const namePart = cleaned
-      .split(/\d+\s*(?:mg|mcg|g)|\(|—|-|\b(?:od|bd|tds|tid|qid|hs)\b/i)[0]
-      .trim();
-    const brandName = namePart || `Medicine ${idx + 1}`;
-
-    const parenMatch = cleaned.match(/\(([^)]+)\)/);
-    const ingredientText = (parenMatch ? parenMatch[1] : brandName).toLowerCase();
-    const activeIngredients = ingredientText
-      .split(/\+|,|\/|\band\b/i)
-      .map((s) => s.replace(/\d+\s*(?:mg|mcg|g)/gi, '').trim())
-      .filter(Boolean);
-
-    const route = /\bac\b/i.test(line)
-      ? 'Oral before food (AC)'
-      : /\bhs\b/i.test(line)
-        ? 'Oral at bedtime (HS)'
-        : 'Oral after food (PC)';
-
-    const totalDailyMg = Math.round(strengthMg * Math.max(1, frequencyPerDay) * 100) / 100;
-    const translatedLine =
-      language === 'ta'
-        ? `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} மி.கி, நாளொன்றுக்கு ${frequencyPerDay} முறை, ${durationDays} நாட்களுக்கு`
-        : language === 'hi'
-          ? `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} mg, दिन में ${frequencyPerDay} बार, ${durationDays} दिन`
-          : `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} mg, ${frequencyPerDay}x/day for ${durationDays} days`;
-
-    items.push({
-      id: `rx-${Date.now()}-${idx + 1}`,
-      brandName,
-      activeIngredients: activeIngredients.length ? activeIngredients : [brandName.toLowerCase()],
-      strengthMg,
-      frequencyPerDay,
-      totalDailyMg,
-      durationDays,
-      route,
-      batchNumber,
-      manufacturer: '',
-      rawLine: line,
-      translatedLine,
-    });
-  });
-
-  return items;
-}
-
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '15mb' }));
+  app.use(express.json({ limit: '35mb' }));
 
   // Health probe
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'medguard-api' });
   });
 
-  // 1. OCR & Structured Prescription Translation (AI reads & translates ONLY; never invents clinical alerts)
+  // 1. Document, Image OCR & Structured Prescription Translation (AI reads & translates ONLY; never invents clinical alerts)
   app.post('/api/prescription/ocr-parse', async (req, res) => {
+    const body = req.body as {
+      imageBase64?: string;
+      fileBase64?: string;
+      mimeType?: string;
+      fileName?: string;
+      rawText?: string;
+      language?: LanguageCode;
+    };
+
+    const fileData = body.fileBase64 || body.imageBase64;
+    const mimeType = body.mimeType || 'application/octet-stream';
+    const fileName = body.fileName || '';
+    const language: LanguageCode = body.language || 'en';
+    const rawText = body.rawText;
+
+    let localExtractedText = '';
+    let localKind: 'text' | 'docx' | 'pdf' | 'image' | null = null;
+    let isScannedPdf = false;
+
     try {
-      const {
-        imageBase64,
-        mimeType,
-        rawText,
-        language = 'en',
-      } = req.body as {
-        imageBase64?: string;
-        mimeType?: string;
-        rawText?: string;
-        language?: LanguageCode;
-      };
+      const hasFile = Boolean(fileData);
+      const isImageMime =
+        mimeType.toLowerCase().startsWith('image/') &&
+        !/\.(pdf|docx|txt|csv|md|json|rtf|html?|xml)$/i.test(fileName);
 
-      const hasImage = Boolean(imageBase64 && mimeType);
+      // Extract text locally up-front for text, DOCX, and digital PDF documents
+      if (hasFile && fileData && !isImageMime) {
+        const localRes = await extractDocumentTextLocally({
+          base64Data: fileData,
+          mimeType,
+          fileName,
+        });
+        localExtractedText = localRes.text;
+        localKind = localRes.kind;
+        isScannedPdf = Boolean(localRes.isEmptyScannedPdf);
+      }
+
       const ai = getAiClient();
+      const textToParse = localExtractedText || rawText || '';
 
+      // Deterministic path when GEMINI_API_KEY is not configured
       if (!ai) {
-        if (!hasImage && rawText && rawText.trim()) {
-          const items = parsePrescriptionLinesDeterministic(rawText, language);
+        if (hasFile && fileData && isImageMime) {
+          const ocrRes = await extractDocumentTextLocally({
+            base64Data: fileData,
+            mimeType,
+            fileName,
+          });
+          const extracted = ocrRes.text;
+          const items = extracted
+            ? parsePrescriptionLinesDeterministic(extracted, language)
+            : [];
+          const ctx = extractPatientContextFromText(extracted);
           return res.json({
             items,
-            extractedRawText: rawText,
-            source: 'deterministic-parser',
+            extractedRawText: extracted,
+            detectedCondition: ctx.detectedCondition,
+            detectedAge: ctx.detectedAge,
+            detectedWeightKg: ctx.detectedWeightKg,
+            source: 'tesseract-ocr',
           });
         }
-        return res.status(503).json({
-          error:
-            'Image OCR requires GEMINI_API_KEY in Secrets. You can also paste prescription text directly into the editor.',
+
+        if (isScannedPdf && !textToParse.trim()) {
+          return res.status(422).json({
+            error:
+              'This PDF appears to be a scanned image with no selectable text layer. Please upload a PNG/JPG photo of the page or configure GEMINI_API_KEY for scanned PDF OCR.',
+          });
+        }
+
+        if (textToParse.trim()) {
+          const items = parsePrescriptionLinesDeterministic(textToParse, language);
+          const ctx = extractPatientContextFromText(textToParse);
+          return res.json({
+            items,
+            extractedRawText: textToParse,
+            detectedCondition: ctx.detectedCondition,
+            detectedAge: ctx.detectedAge,
+            detectedWeightKg: ctx.detectedWeightKg,
+            source: localKind ? `document-${localKind}-parser` : 'deterministic-parser',
+          });
+        }
+
+        return res.status(400).json({
+          error: 'No readable text or image content was found in the uploaded file.',
         });
       }
 
+      // Gemini-powered extraction (supports Images, Scanned/Digital PDFs, and extracted DOCX/TXT text)
       const targetLangName =
         language === 'ta' ? 'Tamil' : language === 'hi' ? 'Hindi' : 'English';
 
       const parts: Array<
         { inlineData: { mimeType: string; data: string } } | { text: string }
       > = [];
-      if (hasImage && imageBase64 && mimeType) {
+
+      const shouldSendBinaryToGemini =
+        hasFile &&
+        fileData &&
+        (isImageMime ||
+          ((mimeType === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf')) &&
+            !localExtractedText));
+
+      if (shouldSendBinaryToGemini && fileData) {
         parts.push({
           inlineData: {
-            mimeType,
-            data: imageBase64,
+            mimeType: isImageMime ? mimeType : 'application/pdf',
+            data: fileData,
           },
         });
       }
+
       parts.push({
-        text: `You are a strictly bounded prescription & medicine-pack OCR extractor.
-Extract ONLY the medicines, strengths (in mg), dosing frequencies per day, durations, batch numbers, manufacturers, and any printed diagnosis/patient age explicitly visible in ${
-          hasImage ? 'this uploaded prescription or medicine strip image' : `this text:\n${rawText}`
+        text: `You are a strictly bounded prescription & medicine-pack document extractor.
+Extract ALL legible text into extractedRawText AND extract ONLY the medicines, strengths (in mg), dosing frequencies per day, durations, batch numbers, manufacturers, and any printed diagnosis/patient age/weight explicitly visible in ${
+          shouldSendBinaryToGemini
+            ? 'this uploaded prescription document or image'
+            : `this extracted document text:\n${textToParse}`
         }.
 IMPORTANT:
-- Map brand names to their lowercase generic INN active ingredients (e.g. Dolo-650 -> ["paracetamol"], Pan-40 -> ["pantoprazole"], Augmentin -> ["amoxicillin"], Glycomet -> ["metformin"], Atorva -> ["atorvastatin"], Telma -> ["telmisartan"]).
+- Map brand names to their lowercase generic INN active ingredients (e.g. Dolo-650/Calpol/Crocin -> ["paracetamol"], Brufen -> ["ibuprofen"], Mox/Augmentin -> ["amoxicillin"], Azithral -> ["azithromycin"], Pan-40 -> ["pantoprazole"], Glycomet -> ["metformin"], Atorva -> ["atorvastatin"], Telma -> ["telmisartan"], Sinarest -> ["chlorpheniramine", "phenylephrine", "paracetamol"]).
 - Convert shorthand like OD=1/day, BD=2/day, TDS/TID=3/day, QID=4/day, 1-0-1=2/day, 1-1-1=3/day, 2-2-2-2=8/day.
 - Provide a plain-language translatedLine in ${targetLangName} for each medicine.
-- Do NOT invent warnings or safety verdicts. If no medicines are legible in the image, return an empty items array.`,
+- Do NOT invent warnings or safety verdicts. Always return extractedRawText with the full text read from the document even if items is empty.`,
       });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: { parts },
-        config: {
-          systemInstruction:
-            'Extract printed or handwritten prescription medicines faithfully into JSON. Never add clinical warnings.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              extractedRawText: { type: Type.STRING },
-              detectedCondition: { type: Type.STRING },
-              detectedAge: { type: Type.NUMBER },
-              detectedWeightKg: { type: Type.NUMBER },
-              items: {
-                type: Type.ARRAY,
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: [{ role: 'user', parts }],
+          config: {
+            systemInstruction:
+              'Extract printed or handwritten prescription medicines and document text faithfully into JSON. Never add clinical warnings.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                extractedRawText: { type: Type.STRING },
+                detectedCondition: { type: Type.STRING },
+                detectedAge: { type: Type.NUMBER },
+                detectedWeightKg: { type: Type.NUMBER },
                 items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    brandName: { type: Type.STRING },
-                    activeIngredients: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      brandName: { type: Type.STRING },
+                      activeIngredients: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      strengthMg: { type: Type.NUMBER },
+                      frequencyPerDay: { type: Type.NUMBER },
+                      durationDays: { type: Type.NUMBER },
+                      route: { type: Type.STRING },
+                      batchNumber: { type: Type.STRING },
+                      manufacturer: { type: Type.STRING },
+                      rawLine: { type: Type.STRING },
+                      translatedLine: { type: Type.STRING },
                     },
-                    strengthMg: { type: Type.NUMBER },
-                    frequencyPerDay: { type: Type.NUMBER },
-                    durationDays: { type: Type.NUMBER },
-                    route: { type: Type.STRING },
-                    batchNumber: { type: Type.STRING },
-                    manufacturer: { type: Type.STRING },
-                    rawLine: { type: Type.STRING },
-                    translatedLine: { type: Type.STRING },
                   },
                 },
               },
             },
           },
-        },
-      });
+        }),
+        localExtractedText || rawText ? 8000 : 22000,
+        'Gemini document extraction'
+      );
 
-      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+      const rawJson = (response.text ?? '{}')
+        .trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+
+      const parsed = JSON.parse(rawJson || '{}') as {
         extractedRawText?: string;
         detectedCondition?: string;
         detectedAge?: number;
@@ -272,7 +265,10 @@ IMPORTANT:
         items?: Array<Partial<PrescriptionItem>>;
       };
 
-      const items: PrescriptionItem[] = (parsed.items ?? []).map((item, idx) => {
+      const finalExtractedText = parsed.extractedRawText || textToParse || '';
+      const ctxFallback = extractPatientContextFromText(finalExtractedText);
+
+      let items: PrescriptionItem[] = (parsed.items ?? []).map((item, idx) => {
         const strengthMg = Number(item.strengthMg) || 0;
         const frequencyPerDay = Number(item.frequencyPerDay) || 1;
         return {
@@ -294,27 +290,51 @@ IMPORTANT:
         };
       });
 
+      if (items.length === 0 && finalExtractedText.trim()) {
+        items = parsePrescriptionLinesDeterministic(finalExtractedText, language);
+      }
+
       return res.json({
         items,
-        extractedRawText: parsed.extractedRawText || (!hasImage ? rawText : '') || '',
-        detectedCondition: parsed.detectedCondition || '',
-        detectedAge: parsed.detectedAge || undefined,
-        detectedWeightKg: parsed.detectedWeightKg || undefined,
+        extractedRawText: finalExtractedText,
+        detectedCondition: parsed.detectedCondition || ctxFallback.detectedCondition || '',
+        detectedAge: parsed.detectedAge || ctxFallback.detectedAge || undefined,
+        detectedWeightKg: parsed.detectedWeightKg || ctxFallback.detectedWeightKg || undefined,
         source: 'gemini-ocr',
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'OCR extraction failed';
-      if (!req.body?.imageBase64 && req.body?.rawText) {
-        const fallbackItems = parsePrescriptionLinesDeterministic(
-          req.body.rawText,
-          req.body.language || 'en'
-        );
-        return res.json({
-          items: fallbackItems,
-          extractedRawText: req.body.rawText,
-          source: 'deterministic-fallback',
-          warning: msg,
-        });
+      const msg = err instanceof Error ? err.message : 'Document extraction failed';
+      try {
+        let fallbackText = localExtractedText || rawText || '';
+        if (!fallbackText && fileData && !isScannedPdf) {
+          const fallbackRes = await extractDocumentTextLocally({
+            base64Data: fileData,
+            mimeType,
+            fileName,
+          });
+          fallbackText = fallbackRes.text;
+        }
+        if (fallbackText.trim()) {
+          const fallbackItems = parsePrescriptionLinesDeterministic(fallbackText, language);
+          const ctx = extractPatientContextFromText(fallbackText);
+          return res.json({
+            items: fallbackItems,
+            extractedRawText: fallbackText,
+            detectedCondition: ctx.detectedCondition,
+            detectedAge: ctx.detectedAge,
+            detectedWeightKg: ctx.detectedWeightKg,
+            source: 'local-fallback-extractor',
+            warning: msg,
+          });
+        }
+        if (isScannedPdf) {
+          return res.status(422).json({
+            error:
+              'This PDF appears to be a scanned image without a selectable text layer and cloud OCR timed out. Please upload a PNG/JPG photo of the page.',
+          });
+        }
+      } catch {
+        // Return original extraction error below
       }
       return res.status(500).json({ error: msg });
     }
@@ -340,7 +360,9 @@ IMPORTANT:
         : Number(patientWeightKg) > 0
           ? Number(patientWeightKg)
           : undefined;
-    const report = verifyPrescription(items, patientCondition, Number(patientAge) || 45, weightVal);
+    const parsedAge = Number(patientAge);
+    const safeAge = Number.isFinite(parsedAge) && parsedAge >= 0 ? parsedAge : 45;
+    const report = verifyPrescription(items, patientCondition, safeAge, weightVal);
     res.json(report);
   });
 
@@ -402,8 +424,8 @@ IMPORTANT:
 STRICT SAFETY RULE: You MUST NOT invent any new drug warnings, side effects, or regulatory recalls beyond what is explicitly inside the JSON report and retrieved RAG references.
 Include:
 1. translatedPrescriptionText: bullet/numbered clear instructions for each medicine in ${targetLang}.
-2. summaryExplanation: plain-language summary of whether the prescription passed all checked rules (Safe) or needs review, citing exact findings and any retrieved pediatric RAG references (CDSCO National AEFI Guidelines, IAP Standard Treatment Guidelines, WHO Model Formulary for Children, WHO Pocket Book) from ragMatches.
-3. cellularAlphaFoldNote: explain in 2-3 clear sentences how the primary target protein (${mech.name}, ${mech.structureId}, ${mech.provenance}) inside the cell's "${mech.cellularOrganelle}" relates to these medicines.
+2. summaryExplanation: plain-language summary of whether the prescription passed all checked rules (Safe) or needs review/unsafe action, explicitly naming the authoritative sources from report.validationSources (e.g., NIH DailyMed FDA label, RCSB PDB, Mol* AlphaFold DB, CDSCO National AEFI Guidelines, IAP STG, WHO Formulary) and any retrieved pediatric RAG references from ragMatches.
+3. cellularAlphaFoldNote: explain in 2-3 clear sentences how the primary target protein (${mech.name}, ${mech.structureId}, ${mech.provenance}) inside the cell's "${mech.cellularOrganelle}" relates to these medicines, citing ${mech.rcsbStructureUrl} and ${mech.alphafoldViewerUrl}.
 4. doctorQuestions: 3 concise, practical questions the patient can ask their doctor or pharmacist in ${targetLang}.
 5. spokenScript: a warm 3-4 sentence voice-ready summary combining summaryExplanation and cellularAlphaFoldNote in ${targetLang}.
 
@@ -413,28 +435,32 @@ ${JSON.stringify(items)}
 VERIFIED REPORT + RETRIEVED RAG REFERENCES JSON:
 ${JSON.stringify(report)}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          systemInstruction:
-            'You are MedGuard Explainer. You ONLY translate and explain pre-verified deterministic findings. Never fabricate warnings or override the overallVerdict.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              translatedPrescriptionText: { type: Type.STRING },
-              summaryExplanation: { type: Type.STRING },
-              cellularAlphaFoldNote: { type: Type.STRING },
-              doctorQuestions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: prompt,
+          config: {
+            systemInstruction:
+              'You are MedGuard Explainer. You ONLY translate and explain pre-verified deterministic findings. Never fabricate warnings or override the overallVerdict.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                translatedPrescriptionText: { type: Type.STRING },
+                summaryExplanation: { type: Type.STRING },
+                cellularAlphaFoldNote: { type: Type.STRING },
+                doctorQuestions: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                spokenScript: { type: Type.STRING },
               },
-              spokenScript: { type: Type.STRING },
             },
           },
-        },
-      });
+        }),
+        18000,
+        'Gemini explanation'
+      );
 
       const data = JSON.parse((response.text ?? '{}').trim()) as {
         translatedPrescriptionText?: string;

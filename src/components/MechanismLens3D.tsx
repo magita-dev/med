@@ -491,10 +491,10 @@ export function MechanismLens3D({
             )}
           </div>
 
-          {/* External Primary Structure Links */}
+          {/* External Primary Structure & FDA Label Links */}
           <div className="pt-3 border-t border-[#D5C8B4] flex flex-wrap items-center gap-3 text-xs">
             <a
-              href={`https://www.rcsb.org/structure/${rcsbId}`}
+              href={target.rcsbStructureUrl}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-[#29659B] hover:underline font-medium"
@@ -502,13 +502,23 @@ export function MechanismLens3D({
               RCSB PDB {rcsbId} <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href={`https://alphafold.ebi.ac.uk/entry/${afId}`}
+              href={target.alphafoldViewerUrl}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-[#8E3E1C] hover:underline font-medium"
             >
-              AlphaFold DB {afId} <ExternalLink className="w-3 h-3" />
+              Mol* AlphaFold DB {afId} <ExternalLink className="w-3 h-3" />
             </a>
+            {target.dailymedUrl && (
+              <a
+                href={target.dailymedUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[#556B22] hover:underline font-medium"
+              >
+                FDA DailyMed Label <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         </div>
       </div>

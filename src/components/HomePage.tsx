@@ -2,6 +2,7 @@ import {
   ArrowRight,
   Bookmark,
   ClipboardList,
+  Database,
   Dna,
   FlaskConical,
   Microscope,
@@ -16,6 +17,7 @@ export type AppPage =
   | 'home'
   | 'scan'
   | 'test-cases'
+  | 'formulary'
   | 'cell'
   | 'mechanism'
   | 'facility'
@@ -83,6 +85,27 @@ const FEATURE_OPTIONS: FeatureOption[] = [
     },
     accentHex: '#BA5D33',
     icon: FlaskConical,
+  },
+  {
+    id: 'formulary',
+    title: {
+      en: 'Pediatric RAG DB',
+      ta: 'குழந்தைகள் மருந்து RAG தொகுப்பு',
+      hi: 'बाल चिकित्सा RAG डेटाबेस',
+    },
+    category: 'CDSCO · IAP · WHO FORMULARY',
+    description: {
+      en: 'Search all 15 pediatric medication RAG monographs, calculate child weight-based doses, check contraindications, and test records in Scan Here.',
+      ta: 'குழந்தைகள் மருந்து அளவுகள், எடை கணக்கீடு மற்றும் CDSCO/WHO எச்சரிக்கைகளைப் பார்க்கவும்.',
+      hi: 'सभी 15 बाल चिकित्सा RAG प्रविष्टियाँ खोजें, वजन-आधारित खुराक गणना करें और स्कैनर में चलाएँ।',
+    },
+    actionLabel: {
+      en: 'Explore RAG Database',
+      ta: 'தொகுப்பைப் பார்',
+      hi: 'डेटाबेस देखें',
+    },
+    accentHex: '#3E7A3A',
+    icon: Database,
   },
   {
     id: 'cell',
