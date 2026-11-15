@@ -15,6 +15,7 @@ import type { LanguageCode, MechanismTargetId } from '../types/medguard.ts';
 export type AppPage =
   | 'home'
   | 'scan'
+  | 'remediation'
   | 'test-cases'
   | 'cell'
   | 'mechanism'

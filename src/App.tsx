@@ -8,7 +8,11 @@ import { LoginPage } from './components/LoginPage.tsx';
 import { MechanismLens3D } from './components/MechanismLens3D.tsx';
 import { MedGuardChatbot } from './components/MedGuardChatbot.tsx';
 import { PharmacistQueue } from './components/PharmacistQueue.tsx';
-import { PrescriptionWorkspace } from './components/PrescriptionWorkspace.tsx';
+import {
+  PrescriptionWorkspace,
+  type ScanSnapshot,
+} from './components/PrescriptionWorkspace.tsx';
+import { RemediationPlanPage } from './components/RemediationPlanPage.tsx';
 import { TestCasesPage } from './components/TestCasesPage.tsx';
 import { MECHANISM_TARGETS } from './data/medguardCatalog.ts';
 import {
@@ -23,6 +27,7 @@ import {
 import type {
   LanguageCode,
   MechanismTargetId,
+  RemediationPlan,
   SamplePreset,
   VerificationReport,
 } from './types/medguard.ts';
@@ -97,6 +102,9 @@ export default function App() {
     nonce: number;
   } | null>(null);
   const [lastReport, setLastReport] = useState<VerificationReport | null>(null);
+  const [scanSnapshot, setScanSnapshot] = useState<ScanSnapshot | null>(null);
+  const [cachedRemediationPlan, setCachedRemediationPlan] =
+    useState<RemediationPlan | null>(null);
   const [savedChecks, setSavedChecks] = useState<SavedCheckRecord[]>([]);
   const [checksLoading, setChecksLoading] = useState(false);
   const [autoSpeakEnabled, setAutoSpeakEnabled] = useState(true);
@@ -224,9 +232,18 @@ export default function App() {
   }, [stopSpeech]);
 
   const handleReportReady = useCallback(
-    (report: VerificationReport) => {
+    (report: VerificationReport, snapshot?: ScanSnapshot) => {
       setLastReport(report);
-      if (autoSpeakEnabled) {
+      if (!snapshot || !snapshot.explanation) {
+        setCachedRemediationPlan(null);
+      }
+      if (snapshot) {
+        setScanSnapshot(snapshot);
+        if (snapshot.explanation) {
+          setSelectedPreset(null);
+        }
+      }
+      if (autoSpeakEnabled && (!snapshot || !snapshot.explanation)) {
         void speakAnalysisSummary(report, language);
       }
     },
@@ -283,6 +300,7 @@ export default function App() {
   const pageLabels: Record<AppPage, string> = {
     home: 'Home',
     scan: 'Scan Here',
+    remediation: 'To-Do Next Plan',
     'test-cases': 'Test Cases',
     cell: 'Cell Structure 3D',
     mechanism: 'AlphaFold 3D',
@@ -351,6 +369,7 @@ export default function App() {
             [
               ['home', 'Home'],
               ['scan', 'Scan Here'],
+              ['remediation', 'To-Do Plan'],
               ['test-cases', 'Test Cases'],
               ['cell', 'Cell 3D'],
               ['mechanism', 'AlphaFold 3D'],
@@ -498,6 +517,7 @@ export default function App() {
             language={language}
             userId={user?.uid ?? null}
             selectedPreset={selectedPreset}
+            restoredSnapshot={selectedPreset ? null : scanSnapshot}
             onLanguageChange={handleLanguageChange}
             onReportReady={handleReportReady}
             onSavedCheck={() => {
@@ -505,6 +525,20 @@ export default function App() {
             }}
             onOpenMechanism={openMechanism}
             onOpenCellView={() => setActivePage('cell')}
+            onOpenRemediationPlan={() => setActivePage('remediation')}
+            onOpenTestCases={() => setActivePage('test-cases')}
+          />
+        )}
+
+        {activePage === 'remediation' && (
+          <RemediationPlanPage
+            language={language}
+            report={scanSnapshot?.report ?? lastReport}
+            items={scanSnapshot?.items ?? []}
+            ragEvaluation={scanSnapshot?.ragEvaluation ?? null}
+            cachedPlan={cachedRemediationPlan}
+            onPlanGenerated={setCachedRemediationPlan}
+            onBackToScan={() => setActivePage('scan')}
             onOpenTestCases={() => setActivePage('test-cases')}
           />
         )}

@@ -63,6 +63,14 @@ const PAGE_DIRECTORY: Record<
       hi: 'फोटो/PDF/DOCX/टेक्स्ट + आयु और रोग',
     },
   },
+  remediation: {
+    label: { en: 'To-Do Next Plan', ta: 'அடுத்த செயல் திட்டம்', hi: 'आगे की कार्य योजना' },
+    requirementHint: {
+      en: 'Step-by-step remediation & safety checks',
+      ta: 'படிப்படியான செயல் & பாதுகாப்புப் படிகள்',
+      hi: 'चरणबद्ध सुधार और सुरक्षा उपाय',
+    },
+  },
   'test-cases': {
     label: { en: 'Test Cases', ta: 'மாதிரி சோதனைகள்', hi: 'टेस्ट केस' },
     requirementHint: {
@@ -258,7 +266,7 @@ export function MedGuardChatbot({
     }
 
     if (latestReport) {
-      suggestedPages = ['mechanism', 'cell', 'scan'];
+      suggestedPages = ['remediation', 'mechanism', 'cell'];
     }
 
     return {

@@ -7,6 +7,7 @@ import type {
 export const VALID_GUIDE_PAGES: AppPageId[] = [
   'home',
   'scan',
+  'remediation',
   'test-cases',
   'cell',
   'mechanism',
@@ -24,6 +25,10 @@ MEDGUARD APPLICATION FEATURES & EXACT USER REQUIREMENTS:
      b) Patient Context: Diagnosed Disease/Condition (e.g., "Viral Fever", "Type 2 Diabetes", "Acute Otitis Media") and Patient Age in years (supports decimal infant ages like 0.5 for 6 months).
      c) Child Weight in kg: Strongly recommended/required whenever checking pediatric patients or weight-dependent medicines (e.g., Paracetamol, Ibuprofen, Amoxicillin, Azithromycin, Cetirizine) so the backend RAG validation returns exact mg/kg/dose and mg/kg/day warnings in the result section.
      d) User Confirmation checkbox before final clinical audit.
+
+1b. To-Do Next Plan (pageId: "remediation")
+   - Purpose: Dedicated page opened from the "To-Do Next Plan" button in Scan Here results. Generates a step-by-step To-Do remediation checklist, next safety measures/labs to undergo, and authoritative clinical sources (FDA DailyMed, WHO, ADA, NICE, CDSCO, IAP, NIH MedlinePlus) at the end of the plan based on whether the dosage or medicine matched the given condition.
+   - Required inputs from user: Complete a prescription scan in Scan Here first, then click "To-Do Next Plan".
 
 2. Test Cases (pageId: "test-cases")
    - Purpose: One-click curated clinical scenarios to see MedGuard's verification and backend RAG validation engine in action without uploading your own document.

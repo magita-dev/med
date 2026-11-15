@@ -343,11 +343,79 @@ export interface SamplePreset {
 export type AppPageId =
   | 'home'
   | 'scan'
+  | 'remediation'
   | 'test-cases'
   | 'cell'
   | 'mechanism'
   | 'facility'
   | 'pharmacist';
+
+export type RemediationMatchTrigger =
+  | 'DOSAGE_AND_DISEASE_MATCHED'
+  | 'DOSAGE_MATCHED_DISEASE_MISMATCH'
+  | 'DISEASE_MATCHED_DOSAGE_ISSUE'
+  | 'CRITICAL_SAFETY_REMEDIATION'
+  | 'GENERAL_CLINICAL_REVIEW';
+
+export type RemediationPriority =
+  | 'Immediate'
+  | 'Before Next Dose'
+  | 'Ongoing Safety'
+  | 'Follow-Up';
+
+export interface RemediationTodoStep {
+  id: string;
+  stepNumber: number;
+  priority: RemediationPriority;
+  timeframe: string;
+  title: string;
+  actionDetail: string;
+  relatedMedicine: string;
+}
+
+export interface SafetyMeasureItem {
+  id: string;
+  category:
+    | 'Clinical Lab / Test'
+    | 'Vital & Symptom Watch'
+    | 'Administration & Handling'
+    | 'Emergency Red Flag';
+  title: string;
+  whenToUndergo: string;
+  rationale: string;
+  clinicianQuestion: string;
+}
+
+export interface RemediationResourceLink {
+  id: string;
+  title: string;
+  publisher: string;
+  scope: string;
+  url: string;
+  sourceType:
+    | 'Clinical Guideline'
+    | 'Regulatory / FDA'
+    | 'WHO / National Formulary'
+    | 'Grounded Web Resource';
+}
+
+export interface RemediationPlan {
+  planId: string;
+  generatedAt: string;
+  language: LanguageCode;
+  triggerClassification: RemediationMatchTrigger;
+  triggerSummary: string;
+  dosageMatchStatusSummary: string;
+  diseaseMatchStatusSummary: string;
+  patientCondition: string;
+  patientAge: number;
+  patientWeightKg?: number;
+  overallVerdict: OverallVerdictStatus;
+  todoSteps: RemediationTodoStep[];
+  safetyMeasures: SafetyMeasureItem[];
+  sources: RemediationResourceLink[];
+  generatedBy: 'gemini-grounded' | 'clinical-curated-engine';
+}
 
 export type GuideUserPersona = 'patient' | 'pediatric' | 'pharmacist' | 'explorer';
 

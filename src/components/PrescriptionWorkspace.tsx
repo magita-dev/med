@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileText,
   Languages,
+  ListChecks,
   Microscope,
   Plus,
   ShieldAlert,
@@ -275,6 +276,17 @@ export function evaluatePrescribedDosageAgainstGuidelines(
   };
 }
 
+export interface ScanSnapshot {
+  report: VerificationReport;
+  items: PrescriptionItem[];
+  ragEvaluation: ConditionAgeDosageEvaluation | null;
+  rawText: string;
+  patientCondition: string;
+  patientAge: string;
+  patientWeightKg: string;
+  explanation: MultilingualExplanation | null;
+}
+
 interface PrescriptionWorkspaceProps {
   language: LanguageCode;
   userId?: string | null;
@@ -283,11 +295,13 @@ interface PrescriptionWorkspaceProps {
     autoVerify: boolean;
     nonce: number;
   } | null;
+  restoredSnapshot?: ScanSnapshot | null;
   onLanguageChange: (lang: LanguageCode) => void;
-  onReportReady: (report: VerificationReport) => void;
+  onReportReady: (report: VerificationReport, snapshot?: ScanSnapshot) => void;
   onSavedCheck?: () => void;
   onOpenMechanism: (targetId: MechanismTargetId) => void;
   onOpenCellView: () => void;
+  onOpenRemediationPlan?: () => void;
   onOpenTestCases?: () => void;
 }
 
@@ -307,6 +321,7 @@ const UI_TEXT: Record<
     questionsTitle: string;
     whyBtn: string;
     cellBtn: string;
+    todoNextBtn: string;
   }
 > = {
   en: {
@@ -323,6 +338,7 @@ const UI_TEXT: Record<
     questionsTitle: 'Questions for Your Doctor or Pharmacist',
     whyBtn: 'Why? Inspect AlphaFold 3D',
     cellBtn: 'See Inside Cell',
+    todoNextBtn: 'To-Do Next Plan',
   },
   ta: {
     uploadTitle: 'மருந்துச்சீட்டு அல்லது மாத்திரை அட்டைப் படத்தை பதிவேற்றவும்',
@@ -338,6 +354,7 @@ const UI_TEXT: Record<
     questionsTitle: 'மருத்துவர் அல்லது மருந்தாளரிடம் கேட்க வேண்டிய கேள்விகள்',
     whyBtn: 'ஏன்? AlphaFold 3D பார்வை',
     cellBtn: 'செல்லின் உள்ளே பார்',
+    todoNextBtn: 'To-Do செயல் திட்டம்',
   },
   hi: {
     uploadTitle: 'प्रिस्क्रिप्शन या दवा स्ट्रिप की फोटो अपलोड करें',
@@ -353,6 +370,7 @@ const UI_TEXT: Record<
     questionsTitle: 'डॉक्टर या फ़ार्मासिस्ट से पूछने के लिए प्रश्न',
     whyBtn: 'क्यों? AlphaFold 3D देखें',
     cellBtn: 'कोशिका के अंदर देखें',
+    todoNextBtn: 'To-Do कार्य योजना',
   },
 };
 
@@ -360,27 +378,43 @@ export function PrescriptionWorkspace({
   language,
   userId,
   selectedPreset,
+  restoredSnapshot,
   onLanguageChange,
   onReportReady,
   onSavedCheck,
   onOpenMechanism,
   onOpenCellView,
+  onOpenRemediationPlan,
   onOpenTestCases,
 }: PrescriptionWorkspaceProps) {
   const t = UI_TEXT[language];
   const initial = selectedPreset?.preset ?? SAMPLE_PRESETS[0];
 
-  const [rawText, setRawText] = useState(initial.rawPrescriptionText);
-  const [patientCondition, setPatientCondition] = useState(initial.patientCondition);
-  const [patientAge, setPatientAge] = useState(String(initial.patientAge));
-  const [patientWeightKg, setPatientWeightKg] = useState('');
-  const [items, setItems] = useState<PrescriptionItem[]>(initial.items);
+  const [rawText, setRawText] = useState(
+    restoredSnapshot?.rawText ?? initial.rawPrescriptionText
+  );
+  const [patientCondition, setPatientCondition] = useState(
+    restoredSnapshot?.patientCondition ?? initial.patientCondition
+  );
+  const [patientAge, setPatientAge] = useState(
+    restoredSnapshot?.patientAge ?? String(initial.patientAge)
+  );
+  const [patientWeightKg, setPatientWeightKg] = useState(
+    restoredSnapshot?.patientWeightKg ?? ''
+  );
+  const [items, setItems] = useState<PrescriptionItem[]>(
+    restoredSnapshot?.items ?? initial.items
+  );
   const [confirmed, setConfirmed] = useState(true);
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const [uploadedDocName, setUploadedDocName] = useState<string>('');
 
-  const [report, setReport] = useState<VerificationReport | null>(null);
-  const [explanation, setExplanation] = useState<MultilingualExplanation | null>(null);
+  const [report, setReport] = useState<VerificationReport | null>(
+    restoredSnapshot?.report ?? null
+  );
+  const [explanation, setExplanation] = useState<MultilingualExplanation | null>(
+    restoredSnapshot?.explanation ?? null
+  );
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -412,13 +446,15 @@ export function PrescriptionWorkspace({
   );
 
   const [scanRagEvaluation, setScanRagEvaluation] =
-    useState<ConditionAgeDosageEvaluation | null>(null);
+    useState<ConditionAgeDosageEvaluation | null>(
+      restoredSnapshot?.ragEvaluation ?? null
+    );
 
   const triggerLocalExplanation = async (
     currentItems: PrescriptionItem[],
     currentReport: VerificationReport,
     targetLang: LanguageCode
-  ) => {
+  ): Promise<MultilingualExplanation> => {
     const explainRes = await fetch('/api/prescription/explain', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -430,6 +466,7 @@ export function PrescriptionWorkspace({
     });
     const explainData: MultilingualExplanation = await explainRes.json();
     setExplanation(explainData);
+    return explainData;
   };
 
   const stopAudio = () => {
@@ -522,11 +559,13 @@ export function PrescriptionWorkspace({
     const verifiedReport: VerificationReport = await verifyRes.json();
     if (!verifyRes.ok) throw new Error('Verification failed');
 
+    let resolvedRagEval: ConditionAgeDosageEvaluation | null = null;
     if (ragEvalRes.ok) {
       const ragData = (await ragEvalRes.json()) as {
         evaluation?: ConditionAgeDosageEvaluation;
       };
-      setScanRagEvaluation(ragData.evaluation ?? null);
+      resolvedRagEval = ragData.evaluation ?? null;
+      setScanRagEvaluation(resolvedRagEval);
     } else {
       setScanRagEvaluation(null);
     }
@@ -542,8 +581,31 @@ export function PrescriptionWorkspace({
 
     setSaveState('idle');
     setReport(verifiedReport);
-    onReportReady(verifiedReport);
-    await triggerLocalExplanation(targetItems, verifiedReport, activeLang);
+    onReportReady(verifiedReport, {
+      report: verifiedReport,
+      items: targetItems,
+      ragEvaluation: resolvedRagEval,
+      rawText,
+      patientCondition: conditionVal,
+      patientAge: String(ageVal),
+      patientWeightKg: weightVal ? String(weightVal) : '',
+      explanation: null,
+    });
+    const explainData = await triggerLocalExplanation(
+      targetItems,
+      verifiedReport,
+      activeLang
+    );
+    onReportReady(verifiedReport, {
+      report: verifiedReport,
+      items: targetItems,
+      ragEvaluation: resolvedRagEval,
+      rawText,
+      patientCondition: conditionVal,
+      patientAge: String(ageVal),
+      patientWeightKg: weightVal ? String(weightVal) : '',
+      explanation: explainData,
+    });
   };
 
   const handleSaveToAccount = async () => {
@@ -1268,6 +1330,16 @@ export function PrescriptionWorkspace({
                     : saveState === 'saved'
                       ? 'Saved to Account'
                       : 'Save Check'}
+                </button>
+              )}
+              {onOpenRemediationPlan && (
+                <button
+                  type="button"
+                  onClick={onOpenRemediationPlan}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#556B22] hover:bg-[#46591B] text-[#FCF9F4] text-xs font-semibold transition-colors whitespace-nowrap"
+                >
+                  <ListChecks className="w-4 h-4" />
+                  {t.todoNextBtn}
                 </button>
               )}
               <button

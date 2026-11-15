@@ -34,8 +34,10 @@ import {
   buildGuideSystemInstruction,
   VALID_GUIDE_PAGES,
 } from './src/server/guideChat.ts';
+import { generateRemediationPlan } from './src/server/remediationPlanner.ts';
 import type {
   AppPageId,
+  ConditionAgeDosageEvaluation,
   FacilityStockItem,
   GuideChatContext,
   GuideChatTurn,
@@ -569,6 +571,35 @@ ${JSON.stringify(report)}`;
     } catch {
       return res.json(buildDeterministicExplanation(items, report, language));
     }
+  });
+
+  // 3b. Grounded Next Remediation Plan & Safety Measures (displayed on dedicated To-Do Next page)
+  app.post('/api/prescription/remediation-plan', async (req, res) => {
+    const {
+      items = [],
+      report,
+      ragEvaluation = null,
+      language = 'en',
+    } = req.body as {
+      items?: PrescriptionItem[];
+      report?: VerificationReport;
+      ragEvaluation?: ConditionAgeDosageEvaluation | null;
+      language?: LanguageCode;
+    };
+
+    if (!report) {
+      return res.status(400).json({ error: 'VerificationReport is required to generate a remediation plan.' });
+    }
+
+    const ai = getAiClient();
+    const plan = await generateRemediationPlan(
+      ai,
+      items,
+      report,
+      language,
+      ragEvaluation
+    );
+    return res.json(plan);
   });
 
   // 4. Multilingual TTS Voice Synthesis via Gemini 3.8 Flash Lite TTS
