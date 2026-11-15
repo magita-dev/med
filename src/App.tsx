@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
-import { ArrowLeft, LogOut, Square, Volume2 } from 'lucide-react';
+import { ArrowLeft, LogOut, MessageSquare, Square, Volume2 } from 'lucide-react';
 import { CellStructure3D } from './components/CellStructure3D.tsx';
 import { FacilityWatchlist } from './components/FacilityWatchlist.tsx';
 import { HomePage, type AppPage } from './components/HomePage.tsx';
 import { LoginPage } from './components/LoginPage.tsx';
 import { MechanismLens3D } from './components/MechanismLens3D.tsx';
-import { MedicationDatabasePage } from './components/MedicationDatabasePage.tsx';
+import { MedGuardChatbot } from './components/MedGuardChatbot.tsx';
 import { PharmacistQueue } from './components/PharmacistQueue.tsx';
 import { PrescriptionWorkspace } from './components/PrescriptionWorkspace.tsx';
 import { TestCasesPage } from './components/TestCasesPage.tsx';
@@ -101,6 +101,7 @@ export default function App() {
   const [checksLoading, setChecksLoading] = useState(false);
   const [autoSpeakEnabled, setAutoSpeakEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -275,7 +276,6 @@ export default function App() {
     ['home', 'Home'],
     ['scan', 'Scan Here'],
     ['test-cases', 'Test Cases'],
-    ['formulary', 'Pediatric RAG DB'],
     ['cell', 'Cell 3D'],
     ['mechanism', 'AlphaFold 3D'],
   ];
@@ -284,7 +284,6 @@ export default function App() {
     home: 'Home',
     scan: 'Scan Here',
     'test-cases': 'Test Cases',
-    formulary: 'Pediatric Medication RAG DB',
     cell: 'Cell Structure 3D',
     mechanism: 'AlphaFold 3D',
     facility: 'Facility Watchlist',
@@ -353,7 +352,6 @@ export default function App() {
               ['home', 'Home'],
               ['scan', 'Scan Here'],
               ['test-cases', 'Test Cases'],
-              ['formulary', 'RAG DB'],
               ['cell', 'Cell 3D'],
               ['mechanism', 'AlphaFold 3D'],
               ['facility', 'Facility'],
@@ -404,6 +402,18 @@ export default function App() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setChatOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#556B22] hover:bg-[#46591B] text-[#FCF9F4] text-xs font-semibold transition-colors whitespace-nowrap"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  {language === 'ta'
+                    ? 'வழிகாட்டியிடம் கேள்'
+                    : language === 'hi'
+                      ? 'गाइड से पूछें'
+                      : 'Ask MedGuard Guide'}
+                </button>
                 <button
                   type="button"
                   onClick={() => setAutoSpeakEnabled((v) => !v)}
@@ -496,7 +506,6 @@ export default function App() {
             onOpenMechanism={openMechanism}
             onOpenCellView={() => setActivePage('cell')}
             onOpenTestCases={() => setActivePage('test-cases')}
-            onOpenFormulary={() => setActivePage('formulary')}
           />
         )}
 
@@ -504,15 +513,6 @@ export default function App() {
           <TestCasesPage
             language={language}
             onSelectPreset={handleSelectTestCase}
-            onOpenScanner={() => setActivePage('scan')}
-          />
-        )}
-
-        {activePage === 'formulary' && (
-          <MedicationDatabasePage
-            language={language}
-            onSelectPreset={handleSelectTestCase}
-            onOpenMechanism={openMechanism}
             onOpenScanner={() => setActivePage('scan')}
           />
         )}
@@ -556,6 +556,19 @@ export default function App() {
           )}
         </div>
       </footer>
+
+      <MedGuardChatbot
+        isOpen={chatOpen}
+        onToggle={setChatOpen}
+        userName={user?.displayName || user?.email || null}
+        isSignedIn={Boolean(user)}
+        language={language}
+        onLanguageChange={handleLanguageChange}
+        activePage={activePage}
+        savedChecks={savedChecks}
+        latestReport={lastReport}
+        onNavigate={(page) => setActivePage(page)}
+      />
     </div>
   );
 }

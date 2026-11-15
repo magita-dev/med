@@ -17,10 +17,9 @@ import {
   Volume2,
 } from 'lucide-react';
 import { DOSE_RULES, SAMPLE_PRESETS } from '../data/medguardCatalog.ts';
-import { getPediatricReferenceByMedicine } from '../data/medicationDatabase.ts';
 import { saveVerificationCheck } from '../firebase.ts';
-import { flagUnsafeDosagesByConditionAndAge } from '../utils/dosageHelper.ts';
 import type {
+  ConditionAgeDosageEvaluation,
   LanguageCode,
   MechanismTargetId,
   MultilingualExplanation,
@@ -290,7 +289,6 @@ interface PrescriptionWorkspaceProps {
   onOpenMechanism: (targetId: MechanismTargetId) => void;
   onOpenCellView: () => void;
   onOpenTestCases?: () => void;
-  onOpenFormulary?: () => void;
 }
 
 const UI_TEXT: Record<
@@ -368,7 +366,6 @@ export function PrescriptionWorkspace({
   onOpenMechanism,
   onOpenCellView,
   onOpenTestCases,
-  onOpenFormulary,
 }: PrescriptionWorkspaceProps) {
   const t = UI_TEXT[language];
   const initial = selectedPreset?.preset ?? SAMPLE_PRESETS[0];
@@ -414,17 +411,8 @@ export function PrescriptionWorkspace({
     [items, effectiveAgeNum]
   );
 
-  const conditionAgeEvaluation = useMemo(
-    () =>
-      flagUnsafeDosagesByConditionAndAge({
-        items,
-        patientCondition,
-        patientAge: effectiveAgeNum,
-        patientWeightKg:
-          Number(patientWeightKg) > 0 ? Number(patientWeightKg) : undefined,
-      }),
-    [items, patientCondition, effectiveAgeNum, patientWeightKg]
-  );
+  const [scanRagEvaluation, setScanRagEvaluation] =
+    useState<ConditionAgeDosageEvaluation | null>(null);
 
   const triggerLocalExplanation = async (
     currentItems: PrescriptionItem[],
@@ -475,6 +463,7 @@ export function PrescriptionWorkspace({
     setItems(clonedItems);
     setConfirmed(true);
     setReport(null);
+    setScanRagEvaluation(null);
     setExplanation(null);
     setSaveState('idle');
     setError('');
@@ -510,18 +499,37 @@ export function PrescriptionWorkspace({
       activeLang
     );
 
-    const verifyRes = await fetch('/api/prescription/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        items: targetItems,
-        patientCondition: conditionVal,
-        patientAge: ageVal,
-        patientWeightKg: weightVal && weightVal > 0 ? weightVal : undefined,
+    const payload = {
+      items: targetItems,
+      patientCondition: conditionVal,
+      patientAge: ageVal,
+      patientWeightKg: weightVal && weightVal > 0 ? weightVal : undefined,
+    };
+
+    const [verifyRes, ragEvalRes] = await Promise.all([
+      fetch('/api/prescription/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       }),
-    });
+      fetch('/api/rag/evaluate-dosage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+    ]);
+
     const verifiedReport: VerificationReport = await verifyRes.json();
     if (!verifyRes.ok) throw new Error('Verification failed');
+
+    if (ragEvalRes.ok) {
+      const ragData = (await ragEvalRes.json()) as {
+        evaluation?: ConditionAgeDosageEvaluation;
+      };
+      setScanRagEvaluation(ragData.evaluation ?? null);
+    } else {
+      setScanRagEvaluation(null);
+    }
 
     if (
       guidelineEval.status === 'Caution' &&
@@ -560,6 +568,7 @@ export function PrescriptionWorkspace({
     setError('');
     setBusy(true);
     setReport(null);
+    setScanRagEvaluation(null);
     setExplanation(null);
     setSaveState('idle');
     setRawText('');
@@ -877,16 +886,6 @@ export function PrescriptionWorkspace({
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {onOpenFormulary && (
-            <button
-              type="button"
-              onClick={onOpenFormulary}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#C6B69E] bg-[#FCF9F4] hover:bg-[#EFE7DA] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap"
-            >
-              <span>Pediatric RAG DB</span>
-              <ArrowRight className="w-3.5 h-3.5 text-[#556B22]" />
-            </button>
-          )}
           {onOpenTestCases && (
             <button
               type="button"
@@ -1095,18 +1094,6 @@ export function PrescriptionWorkspace({
                           placeholder="active ingredient(s)"
                           className="w-full bg-[#F5EFE5] border border-[#D5C8B4] rounded px-2 py-0.5 text-[#29659B] font-mono text-[11px] focus:outline-none focus:border-[#29659B]"
                         />
-                        {effectiveAgeNum < 18 &&
-                          (() => {
-                            const pedRef = getPediatricReferenceByMedicine(
-                              item.activeIngredients[0] || item.brandName
-                            );
-                            if (!pedRef) return null;
-                            return (
-                              <div className="text-[10px] font-mono text-[#556B22] leading-snug pt-0.5">
-                                RAG Ref: {pedRef.reference_dose} · {pedRef.age_range}
-                              </div>
-                            );
-                          })()}
                       </td>
                       <td className="px-2.5 py-2">
                         <input
@@ -1168,49 +1155,6 @@ export function PrescriptionWorkspace({
 
           <div className="space-y-3 pt-2 border-t border-[#E4D9C7]">
             <DosageWarning exceedances={dosageExceedances} language={language} />
-
-            {conditionAgeEvaluation.flaggedCount > 0 && (
-              <div
-                role="alert"
-                aria-label="Condition and Age Dosage Safety Alert"
-                className="rounded-xl p-3.5 bg-[#FDF5E3] border border-[#E4C98C] space-y-2 text-xs text-[#6B4A08]"
-              >
-                <div className="flex items-center gap-2 font-semibold">
-                  <AlertTriangle className="w-4 h-4 text-[#B8841E] shrink-0" />
-                  <span>
-                    Age & Condition Safety Review ({conditionAgeEvaluation.patientGroup} ·{' '}
-                    {conditionAgeEvaluation.patientAgeYears} yrs)
-                  </span>
-                </div>
-                <div className="space-y-1.5">
-                  {conditionAgeEvaluation.flags
-                    .filter((f) => f.isPotentiallyUnsafe)
-                    .map((f) => (
-                      <div
-                        key={f.itemId}
-                        className="rounded-lg bg-[#FCF9F4] border border-[#E4C98C] px-3 py-2 space-y-1 text-[#1E221D]"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="font-semibold">
-                            {f.brandName} ({f.medicineName})
-                          </span>
-                          <span className="font-mono text-[11px] font-semibold text-[#8B152A]">
-                            {f.safetyLevel}
-                          </span>
-                        </div>
-                        <ul className="space-y-0.5 text-[#3C4138]">
-                          {f.reasons.map((r, rIdx) => (
-                            <li key={rIdx}>• {r}</li>
-                          ))}
-                        </ul>
-                        <div className="font-mono text-[11px] text-[#555A50]">
-                          Ref: {f.referenceDose} · {f.source}
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            )}
 
             {items.length > 0 && (
               <div
@@ -1460,154 +1404,201 @@ export function PrescriptionWorkspace({
             </div>
           )}
 
-          {/* Pediatric Safety & Formulary Warnings */}
-          {report.ragMatches && report.ragMatches.length > 0 && (
+          {/* Backend RAG Validation Output (Age, Weight, Condition & Formulary Safety) */}
+          {((report.ragMatches && report.ragMatches.length > 0) ||
+            (scanRagEvaluation && scanRagEvaluation.flaggedCount > 0)) && (
             <div className="organelle-panel rounded-xl p-5 space-y-4 border-[#DEC595]">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <span className="text-xs font-mono text-[#875E0D] font-semibold">
-                    PEDIATRIC DOSAGE & FORMULARY SAFETY (CDSCO · IAP · WHO)
+                    BACKEND RAG VALIDATION OUTPUT (CDSCO · IAP · WHO)
                   </span>
                   <h4 className="font-display text-lg font-semibold text-[#1E221D]">
-                    Pediatric Dosage Safety Warnings
+                    Medication Safety & Dosage RAG Findings
                   </h4>
                 </div>
                 <span className="text-xs font-mono text-[#555A50]">
-                  Pediatric ({report.patientAge} yrs
-                  {report.patientWeightKg ? ` · ${report.patientWeightKg} kg` : ' · weight unverified'})
+                  Age {report.patientAge} yrs
+                  {report.patientWeightKg ? ` · ${report.patientWeightKg} kg` : ''}
+                  {report.patientCondition ? ` · ${report.patientCondition}` : ''}
                 </span>
               </div>
 
-              <div className="grid lg:grid-cols-2 gap-4">
-                {report.ragMatches.map((match) => {
-                  const activeRec = match.triggeredUnsafeRecord ?? match.matchedRecord;
-                  const isStop =
-                    activeRec.safety_status === 'CONTRAINDICATED' ||
-                    activeRec.action === 'CONTRAINDICATED_STOP';
-                  return (
-                    <div
-                      key={match.itemId}
-                      className={`rounded-xl p-4 border space-y-3 text-xs ${
-                        isStop
-                          ? 'bg-[#FCEBEF] border-[#E2A9B3]'
-                          : 'bg-[#FDF5E3] border-[#E4C98C]'
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="space-y-0.5">
-                          <div
-                            className={`flex items-center gap-2 font-mono font-bold ${
-                              isStop ? 'text-[#8B152A]' : 'text-[#875E0D]'
-                            }`}
-                          >
-                            <AlertTriangle
-                              className={`w-4 h-4 shrink-0 ${
-                                isStop ? 'text-[#B4233C]' : 'text-[#B8841E]'
+              {scanRagEvaluation && scanRagEvaluation.flaggedCount > 0 && (
+                <div
+                  role="alert"
+                  aria-label="Condition and Age Dosage Safety Alert"
+                  className="rounded-xl p-4 bg-[#FDF5E3] border border-[#E4C98C] space-y-2.5 text-xs text-[#6B4A08]"
+                >
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertTriangle className="w-4 h-4 text-[#B8841E] shrink-0" />
+                    <span>
+                      Age & Condition RAG Audit ({scanRagEvaluation.patientGroup} ·{' '}
+                      {scanRagEvaluation.patientAgeYears} yrs)
+                    </span>
+                  </div>
+                  <div className="grid lg:grid-cols-2 gap-2.5">
+                    {scanRagEvaluation.flags
+                      .filter((f) => f.isPotentiallyUnsafe)
+                      .map((f) => (
+                        <div
+                          key={f.itemId}
+                          className="rounded-lg bg-[#FCF9F4] border border-[#E4C98C] px-3 py-2.5 space-y-1 text-[#1E221D]"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold">
+                              {f.brandName} ({f.medicineName})
+                            </span>
+                            <span className="font-mono text-[11px] font-semibold text-[#8B152A]">
+                              {f.safetyLevel}
+                            </span>
+                          </div>
+                          <ul className="space-y-0.5 text-[#3C4138]">
+                            {f.reasons.map((r, rIdx) => (
+                              <li key={rIdx}>• {r}</li>
+                            ))}
+                          </ul>
+                          <div className="font-mono text-[11px] text-[#555A50]">
+                            Ref: {f.referenceDose} · {f.source}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {report.ragMatches && report.ragMatches.length > 0 && (
+                <div className="grid lg:grid-cols-2 gap-4">
+                  {report.ragMatches.map((match) => {
+                    const activeRec = match.triggeredUnsafeRecord ?? match.matchedRecord;
+                    const isStop =
+                      activeRec.safety_status === 'CONTRAINDICATED' ||
+                      activeRec.action === 'CONTRAINDICATED_STOP';
+                    return (
+                      <div
+                        key={match.itemId}
+                        className={`rounded-xl p-4 border space-y-3 text-xs ${
+                          isStop
+                            ? 'bg-[#FCEBEF] border-[#E2A9B3]'
+                            : 'bg-[#FDF5E3] border-[#E4C98C]'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="space-y-0.5">
+                            <div
+                              className={`flex items-center gap-2 font-mono font-bold ${
+                                isStop ? 'text-[#8B152A]' : 'text-[#875E0D]'
                               }`}
-                            />
-                            <span>{match.warningBannerTitle}</span>
-                          </div>
-                          <div className="text-sm font-semibold text-[#1E221D]">
-                            {match.matchedRecord.medicine_name} ({match.brandName})
-                          </div>
-                          <div className="text-[11px] text-[#4F544C]">
-                            Brands: {activeRec.brand_examples.join(', ')} · Evidence: {activeRec.evidence_level} · {activeRec.safety_status}
-                          </div>
-                        </div>
-                        <span className="text-xs font-medium px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
-                          {isStop ? 'Pediatric Contraindication' : 'Verify Weight & Dose'}
-                        </span>
-                      </div>
-
-                      <p className="text-[#2B3028] leading-relaxed">{match.warningSummary}</p>
-
-                      <div className="grid sm:grid-cols-2 gap-2 bg-[#FCF9F4] border border-[#D5C8B4] rounded-lg p-2.5">
-                        <div>
-                          <div className="text-[11px] font-mono text-[#555A50]">Reference Dose & Age</div>
-                          <div className="text-[#1E221D] font-medium mt-0.5">
-                            {match.matchedRecord.reference_dose} ({match.matchedRecord.age_range})
-                          </div>
-                          <div className="text-[11px] text-[#4F544C] mt-0.5">
-                            Route: {match.matchedRecord.route} · {match.matchedRecord.frequency}
-                          </div>
-                          {match.calculatedWeightDoseRange && (
-                            <div className="text-[#29659B] font-mono font-semibold text-[11px] mt-1">
-                              Calc: {match.calculatedWeightDoseRange}
+                            >
+                              <AlertTriangle
+                                className={`w-4 h-4 shrink-0 ${
+                                  isStop ? 'text-[#B4233C]' : 'text-[#B8841E]'
+                                }`}
+                              />
+                              <span>{match.warningBannerTitle}</span>
                             </div>
-                          )}
-                        </div>
-                        <div>
-                          <div className="text-[11px] font-mono text-[#555A50]">Weight Guidance & Maximum</div>
-                          <div className="text-[#2B3028] mt-0.5">{match.matchedRecord.weight_guidance}</div>
-                          <div className="text-[11px] text-[#555A50] mt-0.5">{match.matchedRecord.maximum}</div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap gap-2 text-[11px] font-mono">
-                        <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
-                          Weight Check: {activeRec.requires_weight_check ? 'Required' : 'Age-Banded'}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
-                          Formulation Check: {activeRec.requires_formulation_check ? 'Required' : 'Standard'}
-                        </span>
-                      </div>
-
-                      <div className="grid sm:grid-cols-2 gap-2">
-                        <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
-                          <div className="text-[10px] font-mono text-[#8B152A] font-semibold">
-                            CONTRAINDICATIONS
+                            <div className="text-sm font-semibold text-[#1E221D]">
+                              {match.matchedRecord.medicine_name} ({match.brandName})
+                            </div>
+                            <div className="text-[11px] text-[#4F544C]">
+                              Brands: {activeRec.brand_examples.join(', ')} · Evidence: {activeRec.evidence_level} · {activeRec.safety_status}
+                            </div>
                           </div>
-                          <div className="text-[#3C4138]">
-                            {activeRec.contraindications.join(' · ')}
-                          </div>
+                          <span className="text-xs font-medium px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
+                            {isStop ? 'Pediatric Contraindication' : 'Verify Weight & Dose'}
+                          </span>
                         </div>
-                        <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
-                          <div className="text-[10px] font-mono text-[#875E0D] font-semibold">
-                            INTERACTIONS
-                          </div>
-                          <div className="text-[#3C4138]">
-                            {activeRec.interactions.join(' · ')}
-                          </div>
-                        </div>
-                      </div>
 
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-mono text-[#875E0D] font-semibold">
-                          Recommended Action:
-                        </div>
-                        <ul className="space-y-1 text-[#2B3028]">
-                          {activeRec.recommended_action.map((step, i) => (
-                            <li key={i} className="flex items-start gap-1.5">
-                              <span className="font-mono text-[#556B22] font-bold">•</span>
-                              <span>{step}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
+                        <p className="text-[#2B3028] leading-relaxed">{match.warningSummary}</p>
 
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#D5C8B4]">
-                        <a
-                          href={activeRec.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-[11px] font-mono text-[#29659B] hover:underline"
-                        >
-                          <span>Reference: {activeRec.source}</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                        <button
-                          type="button"
-                          onClick={() => onOpenMechanism(match.matchedRecord.mechanism_target_id)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#E9F1F9] border border-[#B3CDE5] text-[#1A4B7A] hover:bg-[#DCEAF7] font-medium"
-                        >
-                          <Microscope className="w-3.5 h-3.5" />
-                          3D {match.matchedRecord.mechanism_target_id}
-                        </button>
+                        <div className="grid sm:grid-cols-2 gap-2 bg-[#FCF9F4] border border-[#D5C8B4] rounded-lg p-2.5">
+                          <div>
+                            <div className="text-[11px] font-mono text-[#555A50]">Reference Dose & Age</div>
+                            <div className="text-[#1E221D] font-medium mt-0.5">
+                              {match.matchedRecord.reference_dose} ({match.matchedRecord.age_range})
+                            </div>
+                            <div className="text-[11px] text-[#4F544C] mt-0.5">
+                              Route: {match.matchedRecord.route} · {match.matchedRecord.frequency}
+                            </div>
+                            {match.calculatedWeightDoseRange && (
+                              <div className="text-[#29659B] font-mono font-semibold text-[11px] mt-1">
+                                Calc: {match.calculatedWeightDoseRange}
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-mono text-[#555A50]">Weight Guidance & Maximum</div>
+                            <div className="text-[#2B3028] mt-0.5">{match.matchedRecord.weight_guidance}</div>
+                            <div className="text-[11px] text-[#555A50] mt-0.5">{match.matchedRecord.maximum}</div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 text-[11px] font-mono">
+                          <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
+                            Weight Check: {activeRec.requires_weight_check ? 'Required' : 'Age-Banded'}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[#1E221D]">
+                            Formulation Check: {activeRec.requires_formulation_check ? 'Required' : 'Standard'}
+                          </span>
+                        </div>
+
+                        <div className="grid sm:grid-cols-2 gap-2">
+                          <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
+                            <div className="text-[10px] font-mono text-[#8B152A] font-semibold">
+                              CONTRAINDICATIONS
+                            </div>
+                            <div className="text-[#3C4138]">
+                              {activeRec.contraindications.join(' · ')}
+                            </div>
+                          </div>
+                          <div className="rounded-lg bg-[#FCF9F4] border border-[#D5C8B4] p-2 space-y-0.5">
+                            <div className="text-[10px] font-mono text-[#875E0D] font-semibold">
+                              INTERACTIONS
+                            </div>
+                            <div className="text-[#3C4138]">
+                              {activeRec.interactions.join(' · ')}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <div className="text-[11px] font-mono text-[#875E0D] font-semibold">
+                            Recommended Action:
+                          </div>
+                          <ul className="space-y-1 text-[#2B3028]">
+                            {activeRec.recommended_action.map((step, i) => (
+                              <li key={i} className="flex items-start gap-1.5">
+                                <span className="font-mono text-[#556B22] font-bold">•</span>
+                                <span>{step}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#D5C8B4]">
+                          <a
+                            href={activeRec.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-[11px] font-mono text-[#29659B] hover:underline"
+                          >
+                            <span>Reference: {activeRec.source}</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => onOpenMechanism(match.matchedRecord.mechanism_target_id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#E9F1F9] border border-[#B3CDE5] text-[#1A4B7A] hover:bg-[#DCEAF7] font-medium"
+                          >
+                            <Microscope className="w-3.5 h-3.5" />
+                            3D {match.matchedRecord.mechanism_target_id}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

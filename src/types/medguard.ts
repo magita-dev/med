@@ -152,6 +152,54 @@ export interface RagRetrievedMatch {
   warningSummary: string;
 }
 
+export interface MedicationRagSource {
+  id: string;
+  name: string;
+  scope: string;
+  url: string;
+  evidenceLevel: 'Verified' | 'Curated';
+}
+
+export type MedicationRagEntry = RagClinicalRecord;
+
+export interface PediatricReferenceHint {
+  reference_dose: string;
+  age_range: string;
+  requires_weight_check: boolean;
+}
+
+export type DosageSafetyFlagLevel =
+  | 'SAFE'
+  | 'POTENTIALLY_UNSAFE'
+  | 'RESTRICTED'
+  | 'CONTRAINDICATED';
+
+export interface MedicationDosageFlag {
+  itemId: string;
+  medicineName: string;
+  activeIngredient: string;
+  brandName: string;
+  matchedEntry: MedicationRagEntry;
+  unsafeEntry?: MedicationRagEntry;
+  safetyLevel: DosageSafetyFlagLevel;
+  isPotentiallyUnsafe: boolean;
+  reasons: string[];
+  recommendedActions: string[];
+  referenceDose: string;
+  source: string;
+  sourceUrl: string;
+}
+
+export interface ConditionAgeDosageEvaluation {
+  overallSafe: boolean;
+  flaggedCount: number;
+  patientCondition: string;
+  patientAgeYears: number;
+  patientAgeMonths: number;
+  patientGroup: 'pediatric' | 'adult' | 'elderly';
+  flags: MedicationDosageFlag[];
+}
+
 export type OverallVerdictStatus =
   | 'SAFE_TO_TAKE'
   | 'CAUTION_REVIEW'
@@ -291,3 +339,47 @@ export interface SamplePreset {
   rawPrescriptionText: string;
   items: PrescriptionItem[];
 }
+
+export type AppPageId =
+  | 'home'
+  | 'scan'
+  | 'test-cases'
+  | 'cell'
+  | 'mechanism'
+  | 'facility'
+  | 'pharmacist';
+
+export type GuideUserPersona = 'patient' | 'pediatric' | 'pharmacist' | 'explorer';
+
+export interface GuideChatContext {
+  userName?: string;
+  isSignedIn: boolean;
+  language: LanguageCode;
+  activePage: AppPageId;
+  persona?: GuideUserPersona;
+  savedChecksCount?: number;
+  recentSavedSummary?: string;
+  latestReport?: {
+    overallVerdict: OverallVerdictStatus;
+    patientCondition: string;
+    patientAge: number;
+    primaryMechanismId: MechanismTargetId;
+    ragFlags: number;
+    dosageIssues: number;
+    regimenFlags: number;
+    packAlerts: number;
+  };
+}
+
+export interface GuideChatTurn {
+  role: 'user' | 'model';
+  text: string;
+}
+
+export interface GuideChatResponse {
+  reply: string;
+  suggestedPages: AppPageId[];
+  suggestedQuestions: string[];
+  source: 'gemini-chat' | 'guide-fallback';
+}
+

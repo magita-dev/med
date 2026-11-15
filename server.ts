@@ -3,7 +3,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   INITIAL_FACILITY_STOCK,
   INITIAL_PHARMACIST_HYPOTHESES,
@@ -15,6 +15,11 @@ import {
   RAG_CLINICAL_RECORDS,
 } from './src/data/pediatricRagDataset.ts';
 import {
+  findMedicationRagRecords,
+  getPediatricReferenceByMedicine,
+} from './src/data/medicationDatabase.ts';
+import { flagUnsafeDosagesByConditionAndAge } from './src/utils/dosageHelper.ts';
+import {
   buildDeterministicExplanation,
   reverseMatchFacilityStock,
   verifyPrescription,
@@ -24,8 +29,16 @@ import {
   extractPatientContextFromText,
   parsePrescriptionLinesDeterministic,
 } from './src/server/documentExtractor.ts';
+import {
+  buildFallbackGuideReply,
+  buildGuideSystemInstruction,
+  VALID_GUIDE_PAGES,
+} from './src/server/guideChat.ts';
 import type {
+  AppPageId,
   FacilityStockItem,
+  GuideChatContext,
+  GuideChatTurn,
   LanguageCode,
   PharmacistHypothesis,
   PrescriptionItem,
@@ -366,26 +379,95 @@ IMPORTANT:
     res.json(report);
   });
 
-  // 2b. Searchable Pediatric Clinical RAG Knowledge Base (CDSCO / IAP / WHO)
+  // 2b. Searchable Pediatric Clinical RAG Knowledge Base (Backend-Only CDSCO / IAP / WHO)
   app.get('/api/rag/records', (req, res) => {
-    const q = String(req.query.q ?? '').trim().toLowerCase();
+    const q = String(req.query.q ?? '').trim();
     const status = String(req.query.status ?? '').trim().toUpperCase();
+    const matchedByQuery = q
+      ? new Set(findMedicationRagRecords(q, 'pediatric').map((r) => r.id))
+      : null;
+    const ql = q.toLowerCase();
+
     const records = RAG_CLINICAL_RECORDS.filter((r) => {
       const matchesStatus = !status || status === 'ALL' || r.safety_status === status;
       if (!matchesStatus) return false;
       if (!q) return true;
       return (
-        r.medicine_name.toLowerCase().includes(q) ||
-        r.active_ingredient.toLowerCase().includes(q) ||
-        r.brand_examples.some((b) => b.toLowerCase().includes(q)) ||
-        r.source.toLowerCase().includes(q) ||
-        r.reason.toLowerCase().includes(q)
+        matchedByQuery?.has(r.id) ||
+        r.medicine_name.toLowerCase().includes(ql) ||
+        r.active_ingredient.toLowerCase().includes(ql) ||
+        r.brand_examples.some((b) => b.toLowerCase().includes(ql)) ||
+        r.source.toLowerCase().includes(ql) ||
+        r.reason.toLowerCase().includes(ql)
       );
     });
+
+    const counts = {
+      total: RAG_CLINICAL_RECORDS.length,
+      reference: RAG_CLINICAL_RECORDS.filter((r) => r.safety_status === 'REFERENCE').length,
+      unsafe: RAG_CLINICAL_RECORDS.filter((r) => r.safety_status === 'POTENTIALLY_UNSAFE').length,
+      contraOrRestricted: RAG_CLINICAL_RECORDS.filter(
+        (r) => r.safety_status === 'CONTRAINDICATED' || r.safety_status === 'RESTRICTED'
+      ).length,
+    };
+
     res.json({
       sources: CLINICAL_RAG_SOURCES,
       records,
       totalCount: RAG_CLINICAL_RECORDS.length,
+      counts,
+    });
+  });
+
+  // 2c. Backend Condition & Age RAG Dosage Evaluation (keeps RAG DB exclusively on backend)
+  app.post('/api/rag/evaluate-dosage', (req, res) => {
+    const {
+      items = [],
+      patientCondition = '',
+      patientAge = 45,
+      patientWeightKg,
+    } = req.body as {
+      items?: PrescriptionItem[];
+      patientCondition?: string;
+      patientAge?: number;
+      patientWeightKg?: number;
+    };
+
+    const parsedAge = Number(patientAge);
+    const safeAge = Number.isFinite(parsedAge) && parsedAge >= 0 ? parsedAge : 45;
+    const weightVal =
+      Number(patientWeightKg) > 0 ? Number(patientWeightKg) : undefined;
+
+    const evaluation = flagUnsafeDosagesByConditionAndAge({
+      items,
+      patientCondition,
+      patientAge: safeAge,
+      patientWeightKg: weightVal,
+    });
+
+    const pediatricRefsByItemId: Record<
+      string,
+      { reference_dose: string; age_range: string; requires_weight_check: boolean }
+    > = {};
+
+    if (safeAge < 18) {
+      for (const item of items) {
+        const pedRef = getPediatricReferenceByMedicine(
+          item.activeIngredients?.[0] || item.brandName
+        );
+        if (pedRef) {
+          pediatricRefsByItemId[item.id] = {
+            reference_dose: pedRef.reference_dose,
+            age_range: pedRef.age_range,
+            requires_weight_check: pedRef.requires_weight_check,
+          };
+        }
+      }
+    }
+
+    res.json({
+      evaluation,
+      pediatricRefsByItemId,
     });
   });
 
@@ -608,6 +690,140 @@ ${JSON.stringify(report)}`;
         : h
     );
     res.json({ hypotheses: pharmacistQueue });
+  });
+
+  // 7. Personalized Multi-Turn MedGuard Guide Chatbot (Gemini 4 Hydrogen)
+  app.post('/api/chat/guide', async (req, res) => {
+    const body = req.body as {
+      message?: string;
+      history?: GuideChatTurn[];
+      context?: GuideChatContext;
+    };
+
+    const userMessage = (body.message || '').trim();
+    if (!userMessage) {
+      return res.status(400).json({ error: 'Message is required.' });
+    }
+
+    const context: GuideChatContext = body.context ?? {
+      isSignedIn: false,
+      language: 'en',
+      activePage: 'home',
+      persona: 'patient',
+    };
+
+    const ai = getAiClient();
+    if (!ai) {
+      return res.json(buildFallbackGuideReply(userMessage, context));
+    }
+
+    try {
+      const sanitizedTurns = (body.history ?? [])
+        .filter((t) => (t.role === 'user' || t.role === 'model') && t.text?.trim())
+        .slice(-16);
+
+      // Gemini chat history should begin with a user turn when non-empty
+      const firstUserIdx = sanitizedTurns.findIndex((t) => t.role === 'user');
+      const alignedHistory =
+        firstUserIdx >= 0
+          ? sanitizedTurns.slice(firstUserIdx).map((t) => ({
+              role: t.role,
+              parts: [{ text: t.text }],
+            }))
+          : [];
+
+      const systemInstruction = buildGuideSystemInstruction(context);
+      const chatSchema = {
+        type: Type.OBJECT,
+        properties: {
+          reply: { type: Type.STRING },
+          suggestedPages: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          suggestedQuestions: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+        },
+        required: ['reply', 'suggestedPages', 'suggestedQuestions'],
+      };
+
+      const runChatWithModel = async (
+        model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite'
+      ) => {
+        const chat = ai.chats.create({
+          model,
+          history: alignedHistory,
+          config: {
+            systemInstruction,
+            ...(model === 'gemini-4-hydrogen'
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+            responseMimeType: 'application/json',
+            responseSchema: chatSchema,
+          },
+        });
+        return withTimeout(
+          chat.sendMessage({ message: userMessage }),
+          14000,
+          `Gemini Guide chat (${model})`
+        );
+      };
+
+      let response;
+      try {
+        response = await runChatWithModel('gemini-4-hydrogen');
+      } catch (primaryErr) {
+        const primaryMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+        const isTransient =
+          /503|unavailable|high demand|overloaded|timed out|429|resource_exhausted/i.test(
+            primaryMsg
+          );
+        if (!isTransient) {
+          throw primaryErr;
+        }
+        response = await runChatWithModel('gemini-3.1-flash-lite');
+      }
+
+      const rawJson = (response.text ?? '{}')
+        .trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+
+      const parsed = JSON.parse(rawJson || '{}') as {
+        reply?: string;
+        suggestedPages?: string[];
+        suggestedQuestions?: string[];
+      };
+
+      const validPages = (parsed.suggestedPages ?? []).filter((p): p is AppPageId =>
+        VALID_GUIDE_PAGES.includes(p as AppPageId)
+      );
+
+      return res.json({
+        reply:
+          parsed.reply?.trim() ||
+          buildFallbackGuideReply(userMessage, context).reply,
+        suggestedPages: Array.from(new Set(validPages)).slice(0, 3),
+        suggestedQuestions: (parsed.suggestedQuestions ?? []).slice(0, 3),
+        source: 'gemini-chat',
+      });
+    } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : 'Unable to reach MedGuard Guide';
+      let cleanMsg = rawMsg;
+      try {
+        const parsedErr = JSON.parse(rawMsg) as { error?: { message?: string } };
+        if (parsedErr?.error?.message) {
+          cleanMsg = parsedErr.error.message;
+        }
+      } catch {
+        // Not JSON error payload
+      }
+      return res.status(502).json({ error: cleanMsg });
+    }
   });
 
   // Vite dev middleware or production static serving
