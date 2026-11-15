@@ -1,0 +1,6 @@
+{
+  "name": "MedGuard",
+  "description": "Cellular-mechanism medicine & prescription verifier: translates prescriptions, verifies dosage & disease match, screens regulator alerts, and explains drug action via AlphaFold 3D structures in English & Tamil.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

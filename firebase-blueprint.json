@@ -1,0 +1,160 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account and language preference record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Firebase Authentication user UID."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "User display name from Google Sign-In."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 180,
+          "description": "Verified user email address."
+        },
+        "preferredLanguage": {
+          "type": "string",
+          "enum": ["en", "ta", "hi"],
+          "minLength": 2,
+          "maxLength": 5,
+          "description": "Preferred UI and speech synthesis language code."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "email", "preferredLanguage", "createdAt", "updatedAt"]
+    },
+    "SavedCheck": {
+      "title": "SavedCheck",
+      "description": "Saved prescription safety verification summary owned by a user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique check identifier."
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Owner Firebase Auth UID."
+        },
+        "patientCondition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Entered disease or condition."
+        },
+        "patientAge": {
+          "type": "integer",
+          "description": "Patient age in years (0-120)."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["SAFE_TO_TAKE", "CAUTION_REVIEW", "ACTION_REQUIRED"],
+          "minLength": 4,
+          "maxLength": 32,
+          "description": "Verification outcome verdict."
+        },
+        "verdictHeadline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Human-readable verdict headline."
+        },
+        "medicineCount": {
+          "type": "integer",
+          "description": "Number of medicines evaluated."
+        },
+        "medicineSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "Compact summary of evaluated medicines."
+        },
+        "primaryMechanismId": {
+          "type": "string",
+          "enum": ["CYP3A4", "CYP2D6", "HERG", "PGP", "AMPK", "COX2"],
+          "minLength": 3,
+          "maxLength": 16,
+          "description": "Primary cellular mechanism target ID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "patientCondition",
+        "patientAge",
+        "verdict",
+        "verdictHeadline",
+        "medicineCount",
+        "medicineSummary",
+        "primaryMechanismId",
+        "createdAt"
+      ]
+    },
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Trusted administrator lookup marker document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 180
+        }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-only user profile and preferred language settings."
+    },
+    "/users/{userId}/checks/{checkId}": {
+      "schema": { "$ref": "#/entities/SavedCheck" },
+      "description": "Saved prescription verification history records belonging to a user."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Server-managed administrator membership documents."
+    }
+  }
+}

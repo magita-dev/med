@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: "Fraunces", Georgia, serif;
+    --font-sans: "Plus Jakarta Sans", "Noto Sans Tamil", system-ui, -apple-system, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+    /* Cell Diagram Palette tokens */
+    --cell-canvas: #f4ede2;
+    --cell-paper: #fcf9f4;
+    --cell-subpanel: #efe7da;
+    --cell-ink: #1e221d;
+    --cell-ink-muted: #555a50;
+    --cell-border: #d5c8b4;
+    --cell-wall: #637928;
+    --cell-nucleus: #74559c;
+    --cell-er: #ba5d33;
+    --cell-golgi: #b8841e;
+    --cell-mito: #29659b;
+    --cell-chloroplast: #3e7a3a;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--cell-canvas);
+    color: var(--cell-ink);
+  }
+
+  h1,
+  h2,
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Warm biological atlas parchment canvas inspired by cellular cross-section diagram */
+.cellular-canvas {
+  background-color: #f4ede2;
+  background-image:
+    radial-gradient(ellipse 75% 48% at 12% 8%, rgba(186, 93, 51, 0.08), transparent 62%),
+    radial-gradient(ellipse 65% 45% at 90% 16%, rgba(116, 85, 156, 0.07), transparent 60%),
+    radial-gradient(ellipse 75% 50% at 52% 94%, rgba(99, 121, 40, 0.09), transparent 65%),
+    radial-gradient(rgba(30, 34, 29, 0.055) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 28px 28px;
+}
+
+/* Crisp warm ivory organelle diagram container */
+.organelle-panel {
+  background-color: #fcf9f4;
+  border: 1px solid #d5c8b4;
+}
+
+.organelle-subpanel {
+  background-color: #f2eadc;
+  border: 1px solid #dcd0bd;
+}
+
+/* Editorial diagram leader line marker */
+.diagram-leader-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background-color: #1e221d;
+  vertical-align: middle;
+}

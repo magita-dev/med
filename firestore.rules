@@ -1,0 +1,139 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'magitamagita789@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'preferredLanguage', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'preferredLanguage', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 && data.uid == userId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && data.preferredLanguage is string && data.preferredLanguage.size() <= 5
+        && data.preferredLanguage in ['en', 'ta', 'hi']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSavedCheck(data, userId, checkId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'patientCondition', 'patientAge', 'verdict',
+          'verdictHeadline', 'medicineCount', 'medicineSummary', 'primaryMechanismId', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'patientCondition', 'patientAge', 'verdict',
+          'verdictHeadline', 'medicineCount', 'medicineSummary', 'primaryMechanismId', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == checkId
+        && isValidId(data.userId) && data.userId == userId
+        && data.patientCondition is string && data.patientCondition.size() >= 1 && data.patientCondition.size() <= 160
+        && data.patientAge is int && data.patientAge >= 0 && data.patientAge <= 120
+        && data.verdict is string && data.verdict.size() <= 32
+        && data.verdict in ['SAFE_TO_TAKE', 'CAUTION_REVIEW', 'ACTION_REQUIRED']
+        && data.verdictHeadline is string && data.verdictHeadline.size() >= 1 && data.verdictHeadline.size() <= 200
+        && data.medicineCount is int && data.medicineCount >= 1 && data.medicineCount <= 50
+        && data.medicineSummary is string && data.medicineSummary.size() >= 1 && data.medicineSummary.size() <= 400
+        && data.primaryMechanismId is string && data.primaryMechanismId.size() <= 16
+        && data.primaryMechanismId in ['CYP3A4', 'CYP2D6', 'HERG', 'PGP', 'AMPK', 'COX2']
+        && data.createdAt is timestamp;
+    }
+
+    // Server-managed admin roster
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && isAdmin();
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // User profile & saved checks
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && (isOwner(userId) || isAdmin())
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'preferredLanguage', 'updatedAt'])
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+
+      match /checks/{checkId} {
+        allow get: if isValidId(userId)
+          && isValidId(checkId)
+          && (isOwner(userId) || isAdmin())
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow list: if isSignedIn() && (
+          (request.auth.uid == userId && resource.data.userId == request.auth.uid) ||
+          isAdmin()
+        );
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(checkId)
+          && isOwner(userId)
+          && isValidSavedCheck(incoming(), userId, checkId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(checkId)
+          && (isOwner(userId) || isAdmin())
+          && exists(/databases/$(database)/documents/users/$(userId));
+      }
+    }
+  }
+}
