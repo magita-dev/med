@@ -10,6 +10,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
+import { summarizeQuizProfile } from '../data/healthQuizCatalog.ts';
 import type { SavedCheckRecord } from '../firebase.ts';
 import type {
   AppPageId,
@@ -18,6 +19,7 @@ import type {
   GuideChatTurn,
   GuideUserPersona,
   LanguageCode,
+  PatientHealthQuiz,
   VerificationReport,
 } from '../types/medguard.ts';
 
@@ -38,6 +40,7 @@ interface MedGuardChatbotProps {
   language: LanguageCode;
   onLanguageChange: (lang: LanguageCode) => void;
   activePage: AppPageId;
+  quizProfile?: PatientHealthQuiz;
   savedChecks: SavedCheckRecord[];
   latestReport: VerificationReport | null;
   onNavigate: (page: AppPageId) => void;
@@ -53,6 +56,14 @@ const PAGE_DIRECTORY: Record<
       en: 'Overview of all modules',
       ta: 'அனைத்து அம்சங்களின் பார்வை',
       hi: 'सभी सुविधाओं का परिचय',
+    },
+  },
+  quiz: {
+    label: { en: 'Health & Safety Quiz', ta: 'உடல்நலப் பாதுகாப்பு வினாடி-வினா', hi: 'स्वास्थ्य सुरक्षा प्रश्नावली' },
+    requirementHint: {
+      en: 'Allergies, recent surgery & fatal risk factors',
+      ta: 'ஒவ்வாமை, அறுவை சிகிச்சை & உயிராபத்து காரணிகள்',
+      hi: 'एलर्जी, हाल की सर्जरी और घातक जोखिम कारक',
     },
   },
   scan: {
@@ -207,6 +218,7 @@ export function MedGuardChatbot({
   language,
   onLanguageChange,
   activePage,
+  quizProfile,
   savedChecks,
   latestReport,
   onNavigate,
@@ -311,6 +323,13 @@ export function MedGuardChatbot({
       recentSavedSummary: recent
         ? `${recent.patientCondition} (${recent.patientAge}y): ${recent.verdict}`
         : undefined,
+      quizSummary: quizProfile
+        ? {
+            completed: quizProfile.completed,
+            decision: quizProfile.decision,
+            summaryText: summarizeQuizProfile(quizProfile, language),
+          }
+        : undefined,
       latestReport: latestReport
         ? {
             overallVerdict: latestReport.overallVerdict,
@@ -321,6 +340,7 @@ export function MedGuardChatbot({
             dosageIssues: latestReport.summaryStats.dosageIssues,
             regimenFlags: latestReport.summaryStats.regimenFlags,
             packAlerts: latestReport.summaryStats.packAlerts,
+            quizRiskFlags: latestReport.summaryStats.quizRiskFlags ?? 0,
           }
         : undefined,
     };

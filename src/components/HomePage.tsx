@@ -1,30 +1,36 @@
 import {
+  AlertTriangle,
   ArrowRight,
   Bookmark,
   ClipboardList,
   Dna,
   FlaskConical,
+  HeartPulse,
   Microscope,
   PackageSearch,
   ScanLine,
+  ShieldAlert,
+  ShieldCheck,
   Trash2,
 } from 'lucide-react';
+import {
+  hasActiveQuizRisks,
+  summarizeQuizProfile,
+} from '../data/healthQuizCatalog.ts';
 import type { SavedCheckRecord } from '../firebase.ts';
-import type { LanguageCode, MechanismTargetId } from '../types/medguard.ts';
+import type {
+  AppPageId,
+  LanguageCode,
+  MechanismTargetId,
+  PatientHealthQuiz,
+} from '../types/medguard.ts';
 
-export type AppPage =
-  | 'home'
-  | 'scan'
-  | 'remediation'
-  | 'test-cases'
-  | 'cell'
-  | 'mechanism'
-  | 'facility'
-  | 'pharmacist';
+export type AppPage = AppPageId;
 
 interface HomePageProps {
   language: LanguageCode;
   userId?: string | null;
+  quizProfile: PatientHealthQuiz;
   savedChecks: SavedCheckRecord[];
   checksLoading: boolean;
   onSelectPage: (page: AppPage) => void;
@@ -43,6 +49,27 @@ interface FeatureOption {
 }
 
 const FEATURE_OPTIONS: FeatureOption[] = [
+  {
+    id: 'quiz',
+    title: {
+      en: 'Health & Safety Quiz',
+      ta: 'உடல்நலப் பாதுகாப்பு வினாடி-வினா',
+      hi: 'स्वास्थ्य व सुरक्षा प्रश्नावली',
+    },
+    category: 'ALLERGY, SURGERY & FATAL-RISK INTAKE',
+    description: {
+      en: 'Record recent surgery, drug allergies, and fatal organ risks once so every prescription scan combines your history for final verdicts.',
+      ta: 'சமீபத்திய அறுவை சிகிச்சை, ஒவ்வாமை & உயிராபத்து காரணிகளைப் பதிவு செய்து ஸ்கேனருடன் இணைக்கவும்.',
+      hi: 'हाल की सर्जरी, दवा एलर्जी और घातक अंग जोखिम दर्ज करें जो हर स्कैन परिणाम में जुड़ेंगे।',
+    },
+    actionLabel: {
+      en: 'Update Safety Quiz',
+      ta: 'வினாடி-வினா திற',
+      hi: 'प्रश्नावली खोलें',
+    },
+    accentHex: '#8B152A',
+    icon: HeartPulse,
+  },
   {
     id: 'scan',
     title: {
@@ -174,14 +201,56 @@ const FEATURE_OPTIONS: FeatureOption[] = [
 export function HomePage({
   language,
   userId,
+  quizProfile,
   savedChecks,
   checksLoading,
   onSelectPage,
   onOpenMechanism,
   onDeleteSavedCheck,
 }: HomePageProps) {
+  const quizHasRisks = hasActiveQuizRisks(quizProfile);
+
   return (
     <div className="space-y-6">
+      {/* Patient Health & Fatal-Risk Quiz Status Strip */}
+      <section
+        className={`rounded-xl p-4 border flex flex-wrap items-center justify-between gap-3 ${
+          quizHasRisks
+            ? 'bg-[#FCEBEF] border-[#E2A9B3]'
+            : quizProfile.completed
+              ? 'bg-[#EAF5E9] border-[#B4D9B1]'
+              : 'bg-[#FDF5E3] border-[#E4C98C]'
+        }`}
+      >
+        <div className="flex items-start gap-3 max-w-3xl">
+          {quizHasRisks ? (
+            <ShieldAlert className="w-5 h-5 text-[#8B152A] shrink-0 mt-0.5" />
+          ) : quizProfile.completed ? (
+            <ShieldCheck className="w-5 h-5 text-[#245920] shrink-0 mt-0.5" />
+          ) : (
+            <AlertTriangle className="w-5 h-5 text-[#875E0D] shrink-0 mt-0.5" />
+          )}
+          <div className="space-y-0.5 text-xs">
+            <div className="font-mono font-semibold text-[#1E221D]">
+              {quizProfile.completed
+                ? 'PATIENT HEALTH & FATAL-RISK QUIZ ACTIVE · COMBINED WITH SCANNER'
+                : 'PATIENT HEALTH & FATAL-RISK QUIZ SKIPPED — TAKE ANYTIME BEFORE SCANNING'}
+            </div>
+            <p className="text-[#2B3028] leading-relaxed">
+              {summarizeQuizProfile(quizProfile, language)}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => onSelectPage('quiz')}
+          className="px-4 py-2 rounded-lg bg-[#FCF9F4] hover:bg-[#EFE7DA] border border-[#C6B69E] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+        >
+          {quizProfile.completed ? 'Review / Retake Quiz' : 'Take Safety Quiz'}
+        </button>
+      </section>
+
       {/* Main Feature Directory */}
       <section className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-2">

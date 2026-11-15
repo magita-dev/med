@@ -6,6 +6,7 @@ import type {
 
 export const VALID_GUIDE_PAGES: AppPageId[] = [
   'home',
+  'quiz',
   'scan',
   'remediation',
   'test-cases',
@@ -17,6 +18,10 @@ export const VALID_GUIDE_PAGES: AppPageId[] = [
 
 export const FEATURE_REQUIREMENTS_KNOWLEDGE = `
 MEDGUARD APPLICATION FEATURES & EXACT USER REQUIREMENTS:
+
+0. Patient Health & Fatal-Risk Safety Quiz (pageId: "quiz")
+   - Purpose: Quick 4-step clinical safety intake presented before the Home Page when opening MedGuard (and editable anytime). Captures drug allergies/anaphylaxis, recent or upcoming surgery (bleeding/anesthesia risks), and vital fatal-end factors (severe liver/kidney failure, heart rhythm/Long QT, GI ulcer/blood thinners, asthma/NSAID triad, pregnancy/breastfeeding, heavy alcohol use, severe dehydration). Every prescription scanned in Scan Here is combined with this quiz profile to finalize the safety verdict.
+   - Required inputs from user: 45-second selection of allergies, surgical window, fatal-risk factors, and optional age/weight.
 
 1. Scan Here (pageId: "scan")
    - Purpose: Upload a prescription or tablet strip, extract medicines automatically, validate dosages and pediatric safety against MedGuard's backend RAG knowledge base (CDSCO, IAP, WHO formulary), check disease/age/weight match, screen for pack recalls, and get spoken explanations in English, Tamil, or Hindi.
@@ -79,8 +84,12 @@ export function buildGuideSystemInstruction(context: GuideChatContext): string {
       }).`
     : 'Guest session (not signed in; remind gently only if they ask about saving history).';
 
+  const quizDetails = context.quizSummary
+    ? `Patient Health & Fatal-Risk Quiz status: decision=${context.quizSummary.decision}, completed=${context.quizSummary.completed} (${context.quizSummary.summaryText}).`
+    : 'Patient Health & Fatal-Risk Quiz status not yet provided.';
+
   const reportDetails = context.latestReport
-    ? `Latest active verification report in this session: verdict=${context.latestReport.overallVerdict}, condition="${context.latestReport.patientCondition}", age=${context.latestReport.patientAge}, primaryMechanism=${context.latestReport.primaryMechanismId}, packAlerts=${context.latestReport.packAlerts}, dosageIssues=${context.latestReport.dosageIssues}, regimenFlags=${context.latestReport.regimenFlags}, ragFlags=${context.latestReport.ragFlags}.`
+    ? `Latest active verification report in this session: verdict=${context.latestReport.overallVerdict}, condition="${context.latestReport.patientCondition}", age=${context.latestReport.patientAge}, primaryMechanism=${context.latestReport.primaryMechanismId}, packAlerts=${context.latestReport.packAlerts}, dosageIssues=${context.latestReport.dosageIssues}, regimenFlags=${context.latestReport.regimenFlags}, ragFlags=${context.latestReport.ragFlags}, quizRiskFlags=${context.latestReport.quizRiskFlags ?? 0}.`
     : 'No prescription verified yet in this session.';
 
   return `You are "MedGuard Guide", a warm, concise, personalized interactive concierge inside the MedGuard web application.
@@ -91,6 +100,7 @@ CURRENT PERSONALIZED USER CONTEXT:
 - Preferred UI language: ${langLabel} (respond naturally in ${langLabel}; keep MedGuard feature names like "Scan Here" or "Pediatric RAG DB" clear).
 - Current page user is viewing: "${context.activePage}"
 - User's stated focus/role: ${personaLabel}
+- ${quizDetails}
 - ${reportDetails}
 
 ${FEATURE_REQUIREMENTS_KNOWLEDGE}
@@ -109,6 +119,18 @@ export function buildFallbackGuideReply(
 ): GuideChatResponse {
   const q = userMessage.toLowerCase();
   const greetingPrefix = context.userName ? `${context.userName}, ` : '';
+
+  if (/quiz|surgery|allergy|allergies|fatal|liver|kidney|pregnant|bleed|history/.test(q)) {
+    return {
+      reply: `${greetingPrefix}open the **Health & Fatal-Risk Quiz** first so MedGuard combines your personal risk factors with every prescription scan:\n\n• **What it checks**: Drug allergies (anaphylaxis), recent or upcoming surgery (bleeding/metformin risk), and fatal-end factors (liver, kidney CKD, Long QT heart rhythm, GI ulcer/blood thinners, pregnancy, asthma).\n• **How it affects Scan Here**: All answers automatically cross-verify every scanned medicine and update your final verdict & To-Do Next Plan.`,
+      suggestedPages: ['quiz', 'scan'],
+      suggestedQuestions: [
+        'How does recent surgery affect painkillers?',
+        'Open Scan Here after completing my quiz',
+      ],
+      source: 'guide-fallback',
+    };
+  }
 
   if (/child|pediatric|baby|infant|kid|weight|kg|amoxicillin|paracetamol|ibuprofen|nimesulide/.test(q)) {
     return {

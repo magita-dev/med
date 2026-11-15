@@ -26,6 +26,8 @@ export function MechanismLens3D({
   );
   const [ligandMode, setLigandMode] = useState<'clash' | 'substrate'>('clash');
   const [selectedResidueId, setSelectedResidueId] = useState<string>(target.residues[0]?.id ?? 'r1');
+  const [viewerMode, setViewerMode] = useState<'threejs' | 'molstar'>('threejs');
+  const [molstarLoaded, setMolstarLoaded] = useState(false);
 
   const ligandModeRef = useRef(ligandMode);
   const provenanceRef = useRef(provenanceMode);
@@ -34,6 +36,7 @@ export function MechanismLens3D({
   useEffect(() => {
     setProvenanceMode(target.provenance === 'AlphaFold-predicted' ? 'AlphaFold' : 'PDB');
     setSelectedResidueId(target.residues[0]?.id ?? 'r1');
+    setMolstarLoaded(false);
   }, [target]);
 
   useEffect(() => {
@@ -346,6 +349,30 @@ export function MechanismLens3D({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1 rounded-lg bg-[#EFE7DA] border border-[#D5C8B4] p-0.5 mr-1">
+            <button
+              type="button"
+              onClick={() => setViewerMode('threejs')}
+              className={`px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                viewerMode === 'threejs'
+                  ? 'bg-[#556B22] text-[#FCF9F4] font-semibold'
+                  : 'text-[#4F544C] hover:text-[#1E221D]'
+              }`}
+            >
+              3D Pocket Stage
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewerMode('molstar')}
+              className={`px-2.5 py-1 text-[11px] font-mono rounded-md transition-colors whitespace-nowrap ${
+                viewerMode === 'molstar'
+                  ? 'bg-[#29659B] text-[#FCF9F4] font-semibold'
+                  : 'text-[#4F544C] hover:text-[#1E221D]'
+              }`}
+            >
+              Mol* Live DB
+            </button>
+          </div>
           {TARGET_IDS.map((id) => (
             <button
               key={id}
@@ -375,70 +402,168 @@ export function MechanismLens3D({
       </div>
 
       <div className="grid lg:grid-cols-[minmax(0,1.45fr)_minmax(310px,1fr)]">
-        {/* 3D Protein Pocket Stage */}
+        {/* 3D Protein Pocket Stage / Click-to-Load Mol* Viewer */}
         <div className="relative bg-[#EFE7DA] min-h-[380px] lg:min-h-[450px]">
-          <div ref={mountRef} className="w-full h-[380px] lg:h-[450px] cursor-grab active:cursor-grabbing" />
+          <div
+            ref={mountRef}
+            className={`${
+              viewerMode === 'threejs' ? 'block' : 'hidden'
+            } w-full h-[380px] lg:h-[450px] cursor-grab active:cursor-grabbing`}
+          />
 
-          {/* Bottom Dock inside 3D Viewport */}
-          <div className="absolute bottom-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 bg-[#FCF9F4]/95 border border-[#D5C8B4] rounded-lg px-3 py-2">
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setLigandMode('clash')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  ligandMode === 'clash'
-                    ? 'bg-[#FCEBEF] text-[#8B152A] border border-[#E2A9B3] font-semibold'
-                    : 'text-[#4F544C] hover:bg-[#EFE7DA]'
-                }`}
-              >
-                Inhibitor Clash ({target.inhibitorLabel})
-              </button>
-              <button
-                type="button"
-                onClick={() => setLigandMode('substrate')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  ligandMode === 'substrate'
-                    ? 'bg-[#EAF5E9] text-[#245920] border border-[#B4D9B1] font-semibold'
-                    : 'text-[#4F544C] hover:bg-[#EFE7DA]'
-                }`}
-              >
-                Normal Substrate ({target.substrateLabel})
-              </button>
+          {viewerMode === 'molstar' && (
+            <div className="w-full h-[380px] lg:h-[450px] flex flex-col bg-[#F5EFE5]">
+              {!molstarLoaded ? (
+                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[11px] font-mono text-[#1E221D]">
+                    {provenanceMode === 'PDB'
+                      ? `Experimental PDB ${rcsbId}`
+                      : `AlphaFold DB ${afId} (pLDDT ${target.plddtScore ?? 'high'})`}
+                  </div>
+                  <h4 className="font-display text-lg font-semibold text-[#1E221D]">
+                    Interactive Mol* 3D Viewer ({target.id})
+                  </h4>
+                  <p className="text-xs text-[#4F544C] max-w-md leading-relaxed">
+                    {provenanceMode === 'PDB'
+                      ? 'Experimental PDB structures capture crystal or cryo-EM coordinates under laboratory conditions. Click below to load the hosted Mol* viewer.'
+                      : 'AlphaFold DB models are computational predictions with per-residue pLDDT confidence. Treat low-confidence loops as unverified.'}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProvenanceMode('PDB');
+                        setMolstarLoaded(true);
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-[#29659B] hover:bg-[#1F507D] text-[#FCF9F4] text-xs font-semibold transition-colors"
+                    >
+                      Load PDB {rcsbId} in Mol*
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProvenanceMode('AlphaFold');
+                        setMolstarLoaded(true);
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-[#8E3E1C] hover:bg-[#733115] text-[#FCF9F4] text-xs font-semibold transition-colors"
+                    >
+                      Load AlphaFold {afId} in Mol*
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <iframe
+                  title={`${target.name} ${provenanceMode} 3D structure`}
+                  src={
+                    provenanceMode === 'PDB'
+                      ? `https://molstar.org/viewer/?pdb=${encodeURIComponent(rcsbId)}`
+                      : `https://molstar.org/viewer/?afdb=${encodeURIComponent(afId)}`
+                  }
+                  className="w-full flex-1 border-0"
+                />
+              )}
+              <div className="px-3 py-2 bg-[#FCF9F4] border-t border-[#D5C8B4] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-[#4F544C]">
+                <span>
+                  {provenanceMode === 'PDB'
+                    ? `Hosted Mol* · Experimental PDB ${rcsbId}`
+                    : `Hosted Mol* · AlphaFold-predicted ${afId}`}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProvenanceMode('PDB');
+                      setMolstarLoaded(true);
+                    }}
+                    className={`px-2 py-0.5 rounded border ${
+                      provenanceMode === 'PDB'
+                        ? 'bg-[#E9F1F9] border-[#B3CDE5] text-[#1A4B7A] font-semibold'
+                        : 'border-[#D5C8B4]'
+                    }`}
+                  >
+                    PDB {rcsbId}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProvenanceMode('AlphaFold');
+                      setMolstarLoaded(true);
+                    }}
+                    className={`px-2 py-0.5 rounded border ${
+                      provenanceMode === 'AlphaFold'
+                        ? 'bg-[#FDF5E3] border-[#E4C98C] text-[#875E0D] font-semibold'
+                        : 'border-[#D5C8B4]'
+                    }`}
+                  >
+                    AlphaFold {afId}
+                  </button>
+                </div>
+              </div>
             </div>
+          )}
 
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setProvenanceMode('PDB')}
-                className={`px-2.5 py-1 text-xs font-mono rounded-md whitespace-nowrap ${
-                  provenanceMode === 'PDB'
-                    ? 'bg-[#E9F1F9] text-[#1A4B7A] border border-[#B3CDE5] font-semibold'
-                    : 'text-[#555A50] hover:text-[#1E221D]'
-                }`}
-              >
-                PDB
-              </button>
-              <button
-                type="button"
-                onClick={() => setProvenanceMode('AlphaFold')}
-                className={`px-2.5 py-1 text-xs font-mono rounded-md whitespace-nowrap ${
-                  provenanceMode === 'AlphaFold'
-                    ? 'bg-[#FDF5E3] text-[#875E0D] border border-[#E4C98C] font-semibold'
-                    : 'text-[#555A50] hover:text-[#1E221D]'
-                }`}
-              >
-                AlphaFold pLDDT
-              </button>
-              <button
-                type="button"
-                onClick={() => resetViewRef.current()}
-                className="p-1.5 text-[#4F544C] hover:text-[#1E221D] rounded-md hover:bg-[#EFE7DA]"
-                title="Reset 3D camera"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
+          {/* Bottom Dock inside Three.js 3D Viewport */}
+          {viewerMode === 'threejs' && (
+            <div className="absolute bottom-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 bg-[#FCF9F4]/95 border border-[#D5C8B4] rounded-lg px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setLigandMode('clash')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    ligandMode === 'clash'
+                      ? 'bg-[#FCEBEF] text-[#8B152A] border border-[#E2A9B3] font-semibold'
+                      : 'text-[#4F544C] hover:bg-[#EFE7DA]'
+                  }`}
+                >
+                  Inhibitor Clash ({target.inhibitorLabel})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLigandMode('substrate')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    ligandMode === 'substrate'
+                      ? 'bg-[#EAF5E9] text-[#245920] border border-[#B4D9B1] font-semibold'
+                      : 'text-[#4F544C] hover:bg-[#EFE7DA]'
+                  }`}
+                >
+                  Normal Substrate ({target.substrateLabel})
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setProvenanceMode('PDB')}
+                  className={`px-2.5 py-1 text-xs font-mono rounded-md whitespace-nowrap ${
+                    provenanceMode === 'PDB'
+                      ? 'bg-[#E9F1F9] text-[#1A4B7A] border border-[#B3CDE5] font-semibold'
+                      : 'text-[#555A50] hover:text-[#1E221D]'
+                  }`}
+                >
+                  PDB
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProvenanceMode('AlphaFold')}
+                  className={`px-2.5 py-1 text-xs font-mono rounded-md whitespace-nowrap ${
+                    provenanceMode === 'AlphaFold'
+                      ? 'bg-[#FDF5E3] text-[#875E0D] border border-[#E4C98C] font-semibold'
+                      : 'text-[#555A50] hover:text-[#1E221D]'
+                  }`}
+                >
+                  AlphaFold pLDDT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resetViewRef.current()}
+                  className="p-1.5 text-[#4F544C] hover:text-[#1E221D] rounded-md hover:bg-[#EFE7DA]"
+                  title="Reset 3D camera"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Mechanism & Residue Audit Side Panel */}

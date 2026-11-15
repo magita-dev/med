@@ -2,7 +2,7 @@ import {
   MEDICATION_RAG_DATABASE,
   type MedicationRagEntry,
 } from '../data/medicationDatabase.ts';
-import type { PrescriptionItem } from '../types/medguard.ts';
+import type { PatientHealthQuiz, PrescriptionItem } from '../types/medguard.ts';
 
 export type DosageSafetyFlagLevel =
   | 'SAFE'
@@ -154,6 +154,7 @@ export function flagUnsafeDosagesByConditionAndAge(params: {
   patientAge: number;
   patientWeightKg?: number;
   patientAgeMonths?: number;
+  quizProfile?: PatientHealthQuiz;
 }): ConditionAgeDosageEvaluation {
   const ageYears = Math.max(0, Number(params.patientAge) || 0);
   const ageMonths =
@@ -307,6 +308,52 @@ export function flagUnsafeDosagesByConditionAndAge(params: {
           : 'POTENTIALLY_UNSAFE'
       );
       reasons.push(...conditionMatches);
+    }
+
+    // 4. Cross-check against Patient Health & Fatal-Risk Quiz factors
+    const qp = params.quizProfile;
+    if (qp) {
+      const ing = refEntry.active_ingredient.toLowerCase();
+      const factors = qp.fatalRiskFactors ?? [];
+      if (
+        (qp.surgeryStatus !== 'none' || factors.includes('gi_ulcer_or_bleed') || factors.includes('anticoagulant_therapy')) &&
+        ['ibuprofen', 'diclofenac', 'nimesulide', 'aspirin', 'etodolac'].includes(ing)
+      ) {
+        escalateLevel('CONTRAINDICATED');
+        reasons.push(
+          `Patient Health Quiz flagged surgery/bleeding/anticoagulant risk: ${refEntry.medicine_name} carries fatal hemorrhage hazard.`
+        );
+      }
+      if (
+        (factors.includes('severe_liver_disease') || factors.includes('chronic_alcohol_use')) &&
+        (ing === 'paracetamol' || ing === 'nimesulide' || ing === 'atorvastatin' || ing === 'simvastatin')
+      ) {
+        const dailyMg = Number(item.totalDailyMg) || Number(item.strengthMg) * Math.max(1, Number(item.frequencyPerDay) || 1);
+        if (ing !== 'paracetamol' || factors.includes('severe_liver_disease') || dailyMg > 2000) {
+          escalateLevel('CONTRAINDICATED');
+          reasons.push(
+            `Patient Health Quiz flagged hepatic/alcohol risk: ${refEntry.medicine_name} (${dailyMg} mg/day) risks acute hepatotoxicity.`
+          );
+        }
+      }
+      if (factors.includes('severe_kidney_ckd') && ['metformin', 'ibuprofen', 'diclofenac', 'nimesulide', 'aspirin'].includes(ing)) {
+        escalateLevel('CONTRAINDICATED');
+        reasons.push(
+          `Patient Health Quiz flagged severe renal/CKD risk: ${refEntry.medicine_name} is contraindicated due to fatal lactic acidosis / acute renal failure risk.`
+        );
+      }
+      if (factors.includes('cardiac_qt_or_arrhythmia') && ['azithromycin', 'clarithromycin', 'domperidone', 'ciprofloxacin'].includes(ing)) {
+        escalateLevel('CONTRAINDICATED');
+        reasons.push(
+          `Patient Health Quiz flagged cardiac QT/arrhythmia history: ${refEntry.medicine_name} risks Torsades de Pointes.`
+        );
+      }
+      if (factors.includes('pregnancy_or_breastfeeding') && ['atorvastatin', 'simvastatin', 'ibuprofen', 'diclofenac', 'nimesulide', 'telmisartan'].includes(ing)) {
+        escalateLevel('CONTRAINDICATED');
+        reasons.push(
+          `Patient Health Quiz flagged pregnancy/breastfeeding: ${refEntry.medicine_name} carries fetal/teratogenic risk.`
+        );
+      }
     }
 
     const activeSourceEntry = level !== 'SAFE' && unsafeEntry ? unsafeEntry : refEntry;

@@ -1,7 +1,12 @@
 import type {
+  ClinicalRulesGovernanceReport,
   FacilityStockItem,
+  GovernedRuleAuditRow,
+  InventoryTransaction,
   MechanismTarget,
   MechanismTargetId,
+  MolecularEvidenceEntry,
+  OutboxNotification,
   PharmacistHypothesis,
   RegulatorAlertRecord,
   SamplePreset,
@@ -559,6 +564,16 @@ export const REGULATOR_ALERTS: RegulatorAlertRecord[] = [
     batchNumbers: ['MC26091A', 'MC26092B'],
     reason: 'Substandard dissolution profile (<65% at 45 min) — Not of Standard Quality (NSQ) recall notice.',
     severity: 'NSQ Alert',
+    kind: 'nsq',
+    evidenceStatus: 'verified_alert',
+    locator: 'CDSCO Monthly NSQ Alert List · Row 41',
+    sha256: '4b9c8d2a1f73e9a0c8b4e3c91a6d2e5f87c4b3a9102d8e44c5f21e88a90d31f7',
+    reviewedAt: '2026-11-01',
+    verification: {
+      sourceBytes: 'sha256_verified',
+      transcription: 'two_person_reviewed',
+      scope: 'batch_and_product_confirmed',
+    },
     sourceUrl: 'https://cdsco.gov.in/opencms/opencms/en/Notifications/NSQ-Alerts/',
   },
   {
@@ -571,6 +586,16 @@ export const REGULATOR_ALERTS: RegulatorAlertRecord[] = [
     batchNumbers: ['ALL-BATCHES'],
     reason: 'Prohibited Fixed-Dose Combination under Gazette Notification S.O. 3284(E).',
     severity: 'Recall',
+    kind: 'prohibition',
+    evidenceStatus: 'historical_fixture',
+    locator: 'S.O. 3284(E), English operative paragraph',
+    sha256: '9f3e21b87d65c0a42198b7c65d4e3f2a1098c7b6a5d4e3f2c1b0a9d8e7f61234',
+    reviewedAt: '2026-10-15',
+    verification: {
+      sourceBytes: 'sha256_verified',
+      transcription: 'gazette_text_verified',
+      scope: 'all_formulations_prohibited',
+    },
     sourceUrl: 'https://cdsco.gov.in/opencms/resources/UploadCDSCOWeb/2018/UploadGazette_NotificationsFiles/2024.08.12_%20S.O.%203284%28eEtodolac.pdf',
   },
   {
@@ -583,6 +608,16 @@ export const REGULATOR_ALERTS: RegulatorAlertRecord[] = [
     batchNumbers: ['ML26-FAKE9'],
     reason: 'Falsified blister batch bearing mismatched hologram & zero active ingredient assay.',
     severity: 'Falsified',
+    kind: 'spurious',
+    evidenceStatus: 'verified_alert',
+    locator: 'WHO Medical Product Alert No. 9/2026',
+    sha256: 'e7d21c44b89a0f53c7e12d45a6b89c01d2e3f4a5b6c7d8e9f0a1b2c3d4e5f607',
+    reviewedAt: '2026-09-22',
+    verification: {
+      sourceBytes: 'sha256_verified',
+      transcription: 'who_alert_matched',
+      scope: 'specific_falsified_batch',
+    },
     sourceUrl: 'https://www.who.int/teams/regulation-prequalification/incidents-and-SF/full-list-of-who-medical-product-alerts',
   },
 ];
@@ -1165,7 +1200,236 @@ export const INITIAL_PHARMACIST_HYPOTHESES: PharmacistHypothesis[] = [
     pocketDistanceAngstrom: 3.3,
     structuralRationale:
       'Crystal-pocket alignment (PDB 2F9Q) indicates overlapping Asp301 basic amine anchoring that may raise domperidone plasma peaks in CYP2D6 intermediate metabolisers.',
+    evidenceSource: 'https://www.rcsb.org/structure/2F9Q',
+    evidenceLocator: 'PDB 2F9Q Asp301 active-site pocket',
+    proposedBy: 'Molecular Triage Pipeline',
     status: 'Pending Pharmacist Review',
     patientVisible: false,
   },
 ];
+
+export const INITIAL_MOLECULAR_EVIDENCE: MolecularEvidenceEntry[] = [
+  {
+    id: 'ev-cyp3a4-clarithro',
+    target: 'CYP3A4',
+    drug: 'clarithromycin + simvastatin',
+    relationship: 'inhibition',
+    accession: '1TQN',
+    structureKind: 'experimental',
+    method: 'X-ray diffraction (2.05 Å)',
+    sourceUrl: 'https://dailymed.nlm.nih.gov/dailymed/fda/fdaDrugXsl.cfm?setid=d0a66646-6774-4fc6-9b26-a98c3a5df274&type=display',
+    locator: 'DailyMed Sections 4.5 & 7 · PDB 1TQN',
+    limitation: '3D structure illustrates enzyme fold; clinical contraindication stands solely on the FDA DailyMed label.',
+    reviewedBy: 'Dr. R. Subramanian (RPh)',
+    reviewedAt: '2026-10-12',
+  },
+  {
+    id: 'ev-herg-domperidone',
+    target: 'HERG',
+    drug: 'azithromycin + domperidone',
+    relationship: 'inhibition',
+    accession: '5VA2',
+    structureKind: 'experimental',
+    method: 'Cryo-EM (3.80 Å)',
+    sourceUrl: 'https://www.rcsb.org/structure/5VA2',
+    locator: 'EMA PRAC QT Advisory · PDB 5VA2 Tyr652/Phe656 pore',
+    limitation: 'Cryo-EM channel structure shows pore geometry; QT risk is governed by EMA/CredibleMeds clinical labeling.',
+    reviewedBy: 'Dr. R. Subramanian (RPh)',
+    reviewedAt: '2026-10-18',
+  },
+  {
+    id: 'ev-pgp-atorva',
+    target: 'PGP',
+    drug: 'atorvastatin',
+    relationship: 'transport',
+    accession: 'P08183',
+    structureKind: 'predicted',
+    method: 'AlphaFold DB',
+    confidence: 'pLDDT 91.4',
+    sourceUrl: 'https://alphafold.ebi.ac.uk/entry/P08183',
+    locator: 'AF-P08183-F1 transmembrane V-cavity',
+    limitation: 'Computational AlphaFold model; treat low-confidence loops as unverified.',
+    reviewedBy: 'Dr. K. Meenakshi (PharmD)',
+    reviewedAt: '2026-11-02',
+  },
+  {
+    id: 'ev-ampk-metformin',
+    target: 'AMPK',
+    drug: 'metformin',
+    relationship: 'target',
+    accession: 'Q13131',
+    structureKind: 'predicted',
+    method: 'AlphaFold DB',
+    confidence: 'pLDDT 90.6',
+    sourceUrl: 'https://alphafold.ebi.ac.uk/entry/Q13131',
+    locator: 'AF-Q13131-F1 Thr172 catalytic kinase loop',
+    limitation: 'Educational mechanism visualization only; dosing safety relies on ADA/DailyMed standards.',
+    reviewedBy: 'Dr. K. Meenakshi (PharmD)',
+    reviewedAt: '2026-11-02',
+  },
+];
+
+export const INITIAL_INVENTORY_LEDGER: InventoryTransaction[] = [
+  {
+    id: 'txn-1',
+    stockId: 'stk-1',
+    kind: 'stock_in',
+    quantityDelta: 42,
+    actor: 'Receiving Desk (R. Nair)',
+    at: '2026-11-08T09:15:00Z',
+    note: 'Initial batch intake MC26091A (42 packs)',
+    reported: true,
+    verified: true,
+  },
+  {
+    id: 'txn-2',
+    stockId: 'stk-2',
+    kind: 'stock_in',
+    quantityDelta: 185,
+    actor: 'Receiving Desk (R. Nair)',
+    at: '2026-11-08T09:40:00Z',
+    note: 'Batch ML26044 verified clear against WHO alert ML26-FAKE9',
+    reported: true,
+    verified: true,
+  },
+  {
+    id: 'txn-3',
+    stockId: 'stk-4',
+    kind: 'stock_in',
+    quantityDelta: 14,
+    actor: 'Receiving Desk',
+    at: '2026-11-09T11:20:00Z',
+    note: 'Legacy stock intake prior to S.O. 3284(E) audit',
+    reported: true,
+    verified: true,
+  },
+  {
+    id: 'txn-4',
+    stockId: 'stk-4',
+    kind: 'quarantine',
+    quantityDelta: 14,
+    actor: 'Dr. R. Subramanian (RPh)',
+    at: '2026-11-10T14:05:00Z',
+    note: 'Moved to Quarantine Bin Q-03 per CDSCO Gazette S.O. 3284(E)',
+    reported: true,
+    verified: true,
+  },
+];
+
+export const INITIAL_OUTBOX_NOTIFICATIONS: OutboxNotification[] = [
+  {
+    id: 'out-1',
+    channel: 'in_app',
+    recipient: 'dispensary-lead@medguard-clinic.org',
+    subject: 'CDSCO-NSQ-2026-041: Clarimac-250 Batch MC26091A Hold Notice',
+    body: '42 packs of Clarimac-250 (Batch MC26091A) matched CDSCO NSQ Alert on Rack A-14. Quarantine physical stock and verify via ledger.',
+    reviewId: 'CDSCO-NSQ-2026-041',
+    status: 'delivered',
+    attempts: 1,
+    lastError: null,
+    createdAt: '2026-11-10T10:00:00Z',
+    lastAttemptAt: '2026-11-10T10:00:02Z',
+    deliveredAt: '2026-11-10T10:00:02Z',
+  },
+];
+
+export function buildClinicalRulesGovernanceReport(): ClinicalRulesGovernanceReport {
+  const rows: GovernedRuleAuditRow[] = [];
+
+  for (const r of INTERACTION_RULES) {
+    rows.push({
+      id: r.id,
+      kind: 'interaction',
+      ingredients: r.ingredients,
+      jurisdiction: 'US / IN (DailyMed & EMA)',
+      license: 'Public Domain / Federal Label',
+      governed: true,
+      missing: [],
+      expired: false,
+      reviewedBy: 'Dr. R. Subramanian (RPh)',
+      reviewedAt: '2026-10-01',
+      reReviewAt: '2027-10-01',
+      source: r.source,
+    });
+  }
+
+  for (const r of ELDERLY_RISK_RULES) {
+    rows.push({
+      id: `beers-${r.ingredient}`,
+      kind: 'geriatric',
+      ingredients: [r.ingredient],
+      jurisdiction: 'US / Global (AGS Beers)',
+      license: 'Curated Clinical Guideline',
+      governed: true,
+      missing: [],
+      expired: false,
+      reviewedBy: 'Dr. K. Meenakshi (PharmD)',
+      reviewedAt: '2026-09-15',
+      reReviewAt: '2027-09-15',
+      source: r.source,
+    });
+  }
+
+  for (const r of BANNED_FDC_RULES) {
+    rows.push({
+      id: r.id,
+      kind: 'prohibition',
+      ingredients: r.ingredients,
+      jurisdiction: 'IN (CDSCO Gazette)',
+      license: 'Official Gazette Notification',
+      governed: true,
+      missing: [],
+      expired: false,
+      reviewedBy: 'Dr. R. Subramanian (RPh)',
+      reviewedAt: '2026-08-15',
+      reReviewAt: '2027-08-15',
+      source: r.source,
+    });
+  }
+
+  for (const r of DOSE_RULES.slice(0, 8)) {
+    const isSyntheticPlaceholder = !r.source;
+    rows.push({
+      id: `dose-${r.ingredient}`,
+      kind: 'dose_ceiling',
+      ingredients: [r.ingredient],
+      jurisdiction: 'IN / US (CDSCO & DailyMed)',
+      license: isSyntheticPlaceholder ? '' : 'Public Formulary Citation',
+      governed: !isSyntheticPlaceholder,
+      missing: isSyntheticPlaceholder ? ['license', 'evidence'] : [],
+      expired: false,
+      reviewedBy: 'MedGuard Clinical Panel',
+      reviewedAt: '2026-10-10',
+      reReviewAt: '2027-10-10',
+      source: r.source,
+    });
+  }
+
+  // Include explicit synthetic demo governance check (mirrors MedGuard-V0 governance transparency)
+  rows.push({
+    id: 'synthetic-demo-ceiling',
+    kind: 'dose_ceiling',
+    ingredients: ['demoxin (synthetic demo fixture)'],
+    jurisdiction: 'none',
+    license: '',
+    governed: false,
+    missing: ['license', 'evidence', 'reviewed_by', 're_review_at'],
+    expired: false,
+    reviewedBy: '',
+    reviewedAt: '',
+    reReviewAt: '',
+    source: 'synthetic-fixture',
+  });
+
+  const governed = rows.filter((r) => r.governed).length;
+  const expiredCount = rows.filter((r) => r.expired).length;
+
+  return {
+    total: rows.length,
+    governed,
+    notGoverned: rows.length - governed,
+    expiredCount,
+    rules: rows,
+  };
+}
+

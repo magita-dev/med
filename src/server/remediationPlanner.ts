@@ -42,7 +42,10 @@ function classifyMatchTrigger(
   const hasCriticalRisk =
     report.overallVerdict === 'ACTION_REQUIRED' ||
     report.packChecks.some((p) => p.tier === 'Confirmed') ||
-    report.regimenFindings.some((f) => f.severity === 'Critical');
+    report.regimenFindings.some((f) => f.severity === 'Critical') ||
+    (report.quizRiskFindings ?? []).some(
+      (q) => q.severity === 'Fatal Risk' || q.severity === 'Critical'
+    );
 
   if (hasCriticalRisk) {
     return {
@@ -285,6 +288,17 @@ export function buildCuratedRemediationPlan(
     });
   };
 
+  // 0. Patient Health Quiz Fatal-Risk, Allergy & Surgical Contraindications (Highest Priority)
+  for (const qf of report.quizRiskFindings ?? []) {
+    pushStep(
+      'Immediate',
+      'STOP before next dose — urgent clinical review',
+      `${qf.category}: ${qf.drugsInvolved.join(', ')} (${qf.matchedQuizFactor})`,
+      `${qf.clinicalSummary} ${qf.recommendedAction}`,
+      qf.drugsInvolved.join(', ')
+    );
+  }
+
   // 1. Batch / Regulatory Recall Remediation
   const confirmedPacks = report.packChecks.filter((p) => p.tier !== 'Not found');
   for (const pack of confirmedPacks) {
@@ -490,6 +504,20 @@ export function buildCuratedRemediationPlan(
     });
   }
 
+  // Add Quiz-matched Fatal Risk Safety Measures if triggered
+  if ((report.quizRiskFindings?.length ?? 0) > 0) {
+    for (const qf of report.quizRiskFindings ?? []) {
+      safetyMeasures.push({
+        id: `sm-${qf.id}`,
+        category: 'Emergency Red Flag',
+        title: `${qf.category}: ${qf.matchedQuizFactor}`,
+        whenToUndergo: 'Before taking the next dose — contact prescriber / surgeon urgently',
+        rationale: qf.clinicalSummary,
+        clinicianQuestion: `My Patient Safety Quiz flagged "${qf.matchedQuizFactor}" alongside ${qf.drugsInvolved.join(', ')}. Which safe alternative should replace it?`,
+      });
+    }
+  }
+
   // Always include a clear Emergency Red-Flag Safety Measure
   safetyMeasures.push({
     id: 'sm-emergency-red-flags',
@@ -532,6 +560,13 @@ export function buildCuratedRemediationPlan(
         : `Based on your scan's dosage, disease-match, and safety audit (${report.overallVerdict}), complete these prioritized remediation steps and safety measures before continuing your regimen.`;
   }
 
+  const quizRiskFlagsCount = report.quizRiskFindings?.length ?? 0;
+  const quizRiskStatusSummary = report.quizProfile?.completed
+    ? quizRiskFlagsCount > 0
+      ? `${quizRiskFlagsCount} fatal/critical conflict(s) detected against your Health Quiz (surgery, allergy, or organ risk).`
+      : 'Cleared all reported Health Quiz factors (recent surgery, allergies, and organ risks).'
+    : 'Patient Health Quiz was skipped; take the Safety Quiz to screen allergies, recent surgery, and fatal organ risks.';
+
   return {
     planId: `rem-${Date.now()}`,
     generatedAt: new Date().toISOString().slice(0, 10),
@@ -540,6 +575,7 @@ export function buildCuratedRemediationPlan(
     triggerSummary,
     dosageMatchStatusSummary,
     diseaseMatchStatusSummary,
+    quizRiskStatusSummary,
     patientCondition: report.patientCondition,
     patientAge: report.patientAge,
     patientWeightKg: report.patientWeightKg,
@@ -581,9 +617,12 @@ CONTEXT:
 - Match Classification: ${baseline.triggerClassification}
 - Dosage Match Summary: ${baseline.dosageMatchStatusSummary}
 - Disease Match Summary: ${baseline.diseaseMatchStatusSummary}
+- Patient Health Quiz Summary: ${baseline.quizRiskStatusSummary}
 - Patient Condition: "${report.patientCondition}", Age: ${report.patientAge} yrs${report.patientWeightKg ? `, Weight: ${report.patientWeightKg} kg` : ''}
 - Overall Verdict: ${report.overallVerdict}
 - Medicines: ${JSON.stringify(items.map((i) => ({ brandName: i.brandName, ingredients: i.activeIngredients, strengthMg: i.strengthMg, frequencyPerDay: i.frequencyPerDay, totalDailyMg: i.totalDailyMg, durationDays: i.durationDays, route: i.route })))}
+- Patient Health Quiz Profile: ${JSON.stringify(report.quizProfile ?? {})}
+- Patient Quiz Fatal-Risk Findings: ${JSON.stringify(report.quizRiskFindings ?? [])}
 - Dosage Audits: ${JSON.stringify(report.dosageAudits)}
 - Disease Audits: ${JSON.stringify(report.diseaseAudits)}
 - Regimen Findings: ${JSON.stringify(report.regimenFindings)}

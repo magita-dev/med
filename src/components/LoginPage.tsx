@@ -105,11 +105,23 @@ export function LoginPage({
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Unable to complete Google Sign-In.';
-      setError(
-        msg.includes('popup-closed-by-user')
-          ? 'Sign-in window was closed before completing login. Please try again.'
-          : msg
-      );
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
+      if (code === 'auth/popup-closed-by-user' || msg.includes('popup-closed-by-user')) {
+        setError('Sign-in window was closed before completing login. Please try again.');
+      } else if (
+        code === 'auth/unauthorized-domain' ||
+        msg.includes('unauthorized-domain')
+      ) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setError(
+          `Domain "${host}" is not authorized in Firebase Authentication yet. Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains, or continue without signing in below.`
+        );
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }

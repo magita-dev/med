@@ -195,16 +195,116 @@ export function extractPatientContextFromText(rawText: string): {
   return { detectedCondition, detectedAge, detectedWeightKg };
 }
 
-export function parsePrescriptionLinesDeterministic(
+export interface ParsedPrescriptionResult {
+  items: PrescriptionItem[];
+  unparsedLines: string[];
+}
+
+const SLOTS_EN = ['morning', 'afternoon', 'night', 'bedtime'] as const;
+const SLOTS_TA = ['காலை', 'மதியம்', 'இரவு', 'படுக்கும் முன்'] as const;
+const SLOTS_HI = ['सुबह', 'दोपहर', 'रात', 'सोते समय'] as const;
+
+export function buildSlotInstruction(params: {
+  brandName: string;
+  activeIngredients: string[];
+  strengthMg: number;
+  frequencyPerDay: number;
+  durationDays: number;
+  slots?: number[];
+  modifiers?: string[];
+  asNeeded?: boolean;
+  language: LanguageCode;
+}): string {
+  const {
+    brandName,
+    activeIngredients,
+    strengthMg,
+    frequencyPerDay,
+    durationDays,
+    slots,
+    modifiers = [],
+    asNeeded,
+    language,
+  } = params;
+
+  const ingLabel = activeIngredients.join(' + ');
+  const parts: string[] = [];
+
+  if (slots && slots.length > 0 && slots.some((n) => n > 0)) {
+    slots.forEach((count, idx) => {
+      if (!count || idx >= 4) return;
+      if (language === 'ta') {
+        parts.push(`${SLOTS_TA[idx]} ${count}`);
+      } else if (language === 'hi') {
+        parts.push(`${SLOTS_HI[idx]} ${count}`);
+      } else {
+        parts.push(idx === 3 ? `${count} at bedtime` : `${count} in the ${SLOTS_EN[idx]}`);
+      }
+    });
+  } else if (asNeeded) {
+    parts.push(
+      language === 'ta'
+        ? 'தேவைப்படும்போது மட்டும்'
+        : language === 'hi'
+          ? 'केवल ज़रूरत पड़ने पर'
+          : 'only as needed'
+    );
+  } else {
+    parts.push(
+      language === 'ta'
+        ? `நாளொன்றுக்கு ${frequencyPerDay} முறை`
+        : language === 'hi'
+          ? `दिन में ${frequencyPerDay} बार`
+          : `${frequencyPerDay}x/day`
+    );
+  }
+
+  for (const mod of modifiers) {
+    if (mod === 'ac') {
+      parts.push(
+        language === 'ta'
+          ? 'உணவுக்கு முன்'
+          : language === 'hi'
+            ? 'भोजन से पहले'
+            : 'before food'
+      );
+    } else if (mod === 'pc') {
+      parts.push(
+        language === 'ta'
+          ? 'உணவுக்குப் பின்'
+          : language === 'hi'
+            ? 'भोजन के बाद'
+            : 'after food'
+      );
+    }
+  }
+
+  if (durationDays > 0) {
+    parts.push(
+      language === 'ta'
+        ? `${durationDays} நாட்களுக்கு`
+        : language === 'hi'
+          ? `${durationDays} दिनों के लिए`
+          : `for ${durationDays} days`
+    );
+  }
+
+  const strengthText =
+    language === 'ta' ? `${strengthMg} மி.கி` : `${strengthMg} mg`;
+  return `${brandName} (${ingLabel}) — ${strengthText}: ${parts.join(', ')}`;
+}
+
+export function parsePrescriptionLinesWithUnparsed(
   rawText: string,
   language: LanguageCode
-): PrescriptionItem[] {
+): ParsedPrescriptionResult {
   const lines = rawText
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 1);
 
   const items: PrescriptionItem[] = [];
+  const unparsedLines: string[] = [];
   const freqMap: Array<[RegExp, number]> = [
     [/\b(?:od|once\s+daily|once\s+a\s+day|hs|at\s+bedtime|stat|every\s+24\s*h)\b/i, 1],
     [/\b(?:bd|bid|twice\s+daily|twice\s+a\s+day|every\s+12\s*h)\b/i, 2],
@@ -226,17 +326,36 @@ export function parsePrescriptionLinesDeterministic(
       Object.keys(BRAND_TO_INGREDIENTS).some((b) => line.toLowerCase().includes(b));
 
     if (!hasStrengthOrForm && !hasKnownMedicine) {
+      if (!headerLinePattern.test(line) && line.length >= 4) {
+        unparsedLines.push(line);
+      }
       return;
     }
     if (headerLinePattern.test(line) && !hasKnownMedicine) {
       return;
     }
 
+    const formMatch = line.match(
+      /^(?:\d+[\).\s-]+)?(tab|tablet|tablets|cap|capsule|capsules|syp|syrup|inj|injection|drops|susp|suspension)\b/i
+    );
+    const formRaw = formMatch?.[1]?.toLowerCase() ?? '';
+    const form = formRaw.startsWith('tab')
+      ? 'tablet'
+      : formRaw.startsWith('cap')
+        ? 'capsule'
+        : formRaw.startsWith('syp') || formRaw.startsWith('syr') || formRaw.startsWith('susp')
+          ? 'syrup'
+          : formRaw.startsWith('inj')
+            ? 'injection'
+            : formRaw
+              ? formRaw
+              : undefined;
+
     const cleaned = line
       .replace(/^[•*\-–]+\s*/, '')
       .replace(/^\d+[\).\s-]+/, '')
       .replace(/^(?:rx\b[:.\s]*)/i, '')
-      .replace(/^(tab|tablet|tablets|cap|capsule|capsules|syp|syrup|inj|drops|susp|suspension)\b\.?\s*/i, '')
+      .replace(/^(tab|tablet|tablets|cap|capsule|capsules|syp|syrup|inj|injection|drops|susp|suspension)\b\.?\s*/i, '')
       .trim();
 
     const strengthMatch = line.match(/(\d+(?:\.\d+)?)\s*(mg|mcg|g)\b(?!\s*\/\s*kg)/i);
@@ -248,17 +367,21 @@ export function parsePrescriptionLinesDeterministic(
     }
 
     let frequencyPerDay = 1;
+    let slots: number[] | undefined;
     const xDayMatch = line.match(/(\d+)\s*(?:x|times)\s*(?:\/|\s*per\s*|\s*a\s*)(?:day|24\s*h|daily)/i);
     const patternMatch = line.match(/\b(\d)\s*-\s*(\d)\s*-\s*(\d)(?:\s*-\s*(\d))?\b/);
     if (xDayMatch) {
       frequencyPerDay = Math.max(1, Number(xDayMatch[1]));
     } else if (patternMatch) {
+      slots = [
+        Number(patternMatch[1]),
+        Number(patternMatch[2]),
+        Number(patternMatch[3]),
+        ...(patternMatch[4] !== undefined ? [Number(patternMatch[4])] : []),
+      ];
       frequencyPerDay = Math.max(
         1,
-        Number(patternMatch[1]) +
-          Number(patternMatch[2]) +
-          Number(patternMatch[3]) +
-          (patternMatch[4] ? Number(patternMatch[4]) : 0)
+        slots.reduce((acc, n) => acc + n, 0)
       );
     } else {
       for (const [regex, count] of freqMap) {
@@ -269,7 +392,12 @@ export function parsePrescriptionLinesDeterministic(
       }
     }
 
-    const durMatch = line.match(/(?:x|for)\s*(\d+)\s*(days?|d|weeks?|wks?)/i);
+    const asNeeded = /\b(?:sos|prn)\b/i.test(line);
+    const modifiers: string[] = [];
+    if (/\bac\b|before\s+(?:food|meals?)/i.test(line)) modifiers.push('ac');
+    if (/\bpc\b|after\s+(?:food|meals?)/i.test(line)) modifiers.push('pc');
+
+    const durMatch = line.match(/(?:x|×|for)\s*(\d+)\s*(days?|d|weeks?|wks?)/i);
     const durationDays = durMatch
       ? Number(durMatch[1]) * (durMatch[2].toLowerCase().startsWith('w') ? 7 : 1)
       : 5;
@@ -278,14 +406,14 @@ export function parsePrescriptionLinesDeterministic(
     const batchNumber = batchMatch ? batchMatch[1] : '';
 
     const namePart = cleaned
-      .split(/\s+\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml)\b|\(|—|\s+-\s+|\b(?:od|bd|bid|tds|tid|qid|hs|sos|once|twice|thrice)\b/i)[0]
+      .split(/\s+\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml)\b|\(|—|\s+-\s+|\b(?:od|bd|bid|tds|tid|qid|hs|sos|prn|once|twice|thrice)\b/i)[0]
       .trim();
     const brandName = namePart || `Medicine ${idx + 1}`;
 
     const parenMatch = cleaned.match(/\(([^)]+)\)/);
     const parenIsIngredient =
       parenMatch &&
-      !/^(?:od|bd|bid|tds|tid|qid|hs|pc|ac|sos|oral|\d+x\/day)$/i.test(parenMatch[1].trim());
+      !/^(?:od|bd|bid|tds|tid|qid|hs|pc|ac|sos|prn|oral|\d+x\/day)$/i.test(parenMatch[1].trim());
     const activeIngredients = inferIngredients(
       cleaned,
       parenIsIngredient ? parenMatch[1] : undefined
@@ -300,12 +428,17 @@ export function parsePrescriptionLinesDeterministic(
           : 'Oral after food (PC)';
 
     const totalDailyMg = Math.round(strengthMg * Math.max(1, frequencyPerDay) * 100) / 100;
-    const translatedLine =
-      language === 'ta'
-        ? `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} மி.கி, நாளொன்றுக்கு ${frequencyPerDay} முறை, ${durationDays} நாட்களுக்கு`
-        : language === 'hi'
-          ? `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} mg, दिन में ${frequencyPerDay} बार, ${durationDays} दिन`
-          : `${brandName} (${activeIngredients.join(' + ')}) — ${strengthMg} mg, ${frequencyPerDay}x/day for ${durationDays} days`;
+    const translatedLine = buildSlotInstruction({
+      brandName,
+      activeIngredients,
+      strengthMg,
+      frequencyPerDay,
+      durationDays,
+      slots,
+      modifiers,
+      asNeeded,
+      language,
+    });
 
     items.push({
       id: `rx-${Date.now()}-${items.length + 1}`,
@@ -320,17 +453,38 @@ export function parsePrescriptionLinesDeterministic(
       manufacturer: '',
       rawLine: line,
       translatedLine,
+      form,
+      slots,
+      modifiers,
+      asNeeded,
     });
   });
 
-  return items;
+  return { items, unparsedLines };
+}
+
+export function parsePrescriptionLinesDeterministic(
+  rawText: string,
+  language: LanguageCode
+): PrescriptionItem[] {
+  return parsePrescriptionLinesWithUnparsed(rawText, language).items;
+}
+
+export interface OcrLineItem {
+  text: string;
+  confidence: number;
 }
 
 export async function extractDocumentTextLocally(params: {
   base64Data: string;
   mimeType: string;
   fileName?: string;
-}): Promise<{ text: string; kind: 'text' | 'docx' | 'pdf' | 'image'; isEmptyScannedPdf?: boolean }> {
+}): Promise<{
+  text: string;
+  kind: 'text' | 'docx' | 'pdf' | 'image';
+  isEmptyScannedPdf?: boolean;
+  ocrLines?: OcrLineItem[];
+}> {
   const { base64Data, mimeType, fileName = '' } = params;
   const lowerMime = mimeType.toLowerCase();
   const lowerName = fileName.toLowerCase();
@@ -379,8 +533,18 @@ export async function extractDocumentTextLocally(params: {
 
   // 4. Image OCR via Tesseract.js fallback
   const ocrResult = await Tesseract.recognize(buffer, 'eng');
+  const rawText = (ocrResult?.data?.text || '').trim();
+  const ocrLines: OcrLineItem[] = rawText
+    .split(/\r?\n/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((t) => ({
+      text: t,
+      confidence: Math.max(0.5, Math.min(0.99, (ocrResult?.data?.confidence ?? 80) / 100)),
+    }));
   return {
-    text: (ocrResult?.data?.text || '').trim(),
+    text: rawText,
     kind: 'image',
+    ocrLines,
   };
 }

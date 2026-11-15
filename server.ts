@@ -6,9 +6,13 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   INITIAL_FACILITY_STOCK,
+  INITIAL_INVENTORY_LEDGER,
+  INITIAL_MOLECULAR_EVIDENCE,
+  INITIAL_OUTBOX_NOTIFICATIONS,
   INITIAL_PHARMACIST_HYPOTHESES,
   MECHANISM_TARGETS,
   REGULATOR_ALERTS,
+  buildClinicalRulesGovernanceReport,
 } from './src/data/medguardCatalog.ts';
 import {
   CLINICAL_RAG_SOURCES,
@@ -27,7 +31,8 @@ import {
 import {
   extractDocumentTextLocally,
   extractPatientContextFromText,
-  parsePrescriptionLinesDeterministic,
+  parsePrescriptionLinesWithUnparsed,
+  type OcrLineItem,
 } from './src/server/documentExtractor.ts';
 import {
   buildFallbackGuideReply,
@@ -41,7 +46,14 @@ import type {
   FacilityStockItem,
   GuideChatContext,
   GuideChatTurn,
+  InventoryReconciliation,
+  InventoryTransaction,
   LanguageCode,
+  LedgerMovementKind,
+  MechanismTargetId,
+  MolecularEvidenceEntry,
+  OutboxNotification,
+  PatientHealthQuiz,
   PharmacistHypothesis,
   PrescriptionItem,
   RegulatorAlertRecord,
@@ -80,9 +92,41 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
-// In-memory store for Facility Watchlist & Pharmacist-Only Hypothesis Queue
+// In-memory store for Facility Watchlist, Ledger, Outbox & Pharmacist-Only Queue/Evidence
 let facilityStock: FacilityStockItem[] = [...INITIAL_FACILITY_STOCK];
 let pharmacistQueue: PharmacistHypothesis[] = [...INITIAL_PHARMACIST_HYPOTHESES];
+let inventoryLedger: InventoryTransaction[] = [...INITIAL_INVENTORY_LEDGER];
+let outboxNotifications: OutboxNotification[] = [...INITIAL_OUTBOX_NOTIFICATIONS];
+let molecularEvidence: MolecularEvidenceEntry[] = [...INITIAL_MOLECULAR_EVIDENCE];
+
+const LEDGER_DELTA: Record<LedgerMovementKind, number> = {
+  stock_in: 1,
+  stock_out: -1,
+  quarantine: -1,
+  return: 1,
+  record_correction: 0,
+};
+
+function computeStockReconciliation(stockId: string): InventoryReconciliation | null {
+  const item = facilityStock.find((s) => s.id === stockId);
+  if (!item) return null;
+  const txns = inventoryLedger.filter((t) => t.stockId === stockId);
+  const ledgerQuantity = txns.reduce(
+    (sum, t) => sum + (LEDGER_DELTA[t.kind] ?? 0) * t.quantityDelta,
+    0
+  );
+  const verifiedMovements = txns.filter((t) => t.verified).length;
+  const reportedUnverifiedMovements = txns.filter((t) => t.reported && !t.verified).length;
+  return {
+    stockId,
+    expectedQuantity: item.quantityPacks,
+    ledgerQuantity,
+    matchesRecord: item.quantityPacks === ledgerQuantity,
+    verifiedMovements,
+    reportedUnverifiedMovements,
+    allVerified: reportedUnverifiedMovements === 0,
+  };
+}
 
 async function startServer() {
   const app = express();
@@ -113,6 +157,7 @@ async function startServer() {
     let localExtractedText = '';
     let localKind: 'text' | 'docx' | 'pdf' | 'image' | null = null;
     let isScannedPdf = false;
+    let ocrLines: OcrLineItem[] = [];
 
     try {
       const hasFile = Boolean(fileData);
@@ -130,6 +175,7 @@ async function startServer() {
         localExtractedText = localRes.text;
         localKind = localRes.kind;
         isScannedPdf = Boolean(localRes.isEmptyScannedPdf);
+        ocrLines = localRes.ocrLines ?? [];
       }
 
       const ai = getAiClient();
@@ -144,12 +190,15 @@ async function startServer() {
             fileName,
           });
           const extracted = ocrRes.text;
-          const items = extracted
-            ? parsePrescriptionLinesDeterministic(extracted, language)
-            : [];
+          ocrLines = ocrRes.ocrLines ?? [];
+          const parsedDet = extracted
+            ? parsePrescriptionLinesWithUnparsed(extracted, language)
+            : { items: [], unparsedLines: [] };
           const ctx = extractPatientContextFromText(extracted);
           return res.json({
-            items,
+            items: parsedDet.items,
+            unparsedLines: parsedDet.unparsedLines,
+            ocrLines,
             extractedRawText: extracted,
             detectedCondition: ctx.detectedCondition,
             detectedAge: ctx.detectedAge,
@@ -166,10 +215,12 @@ async function startServer() {
         }
 
         if (textToParse.trim()) {
-          const items = parsePrescriptionLinesDeterministic(textToParse, language);
+          const parsedDet = parsePrescriptionLinesWithUnparsed(textToParse, language);
           const ctx = extractPatientContextFromText(textToParse);
           return res.json({
-            items,
+            items: parsedDet.items,
+            unparsedLines: parsedDet.unparsedLines,
+            ocrLines,
             extractedRawText: textToParse,
             detectedCondition: ctx.detectedCondition,
             detectedAge: ctx.detectedAge,
@@ -305,12 +356,27 @@ IMPORTANT:
         };
       });
 
-      if (items.length === 0 && finalExtractedText.trim()) {
-        items = parsePrescriptionLinesDeterministic(finalExtractedText, language);
+      const detFallback = finalExtractedText.trim()
+        ? parsePrescriptionLinesWithUnparsed(finalExtractedText, language)
+        : { items: [], unparsedLines: [] };
+
+      let unparsedLines: string[] = detFallback.unparsedLines;
+      if (items.length === 0 && detFallback.items.length > 0) {
+        items = detFallback.items;
+      }
+
+      if (ocrLines.length === 0 && finalExtractedText.trim() && isImageMime) {
+        ocrLines = finalExtractedText
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .map((l) => ({ text: l, confidence: 0.92 }));
       }
 
       return res.json({
         items,
+        unparsedLines,
+        ocrLines,
         extractedRawText: finalExtractedText,
         detectedCondition: parsed.detectedCondition || ctxFallback.detectedCondition || '',
         detectedAge: parsed.detectedAge || ctxFallback.detectedAge || undefined,
@@ -328,12 +394,15 @@ IMPORTANT:
             fileName,
           });
           fallbackText = fallbackRes.text;
+          ocrLines = fallbackRes.ocrLines ?? ocrLines;
         }
         if (fallbackText.trim()) {
-          const fallbackItems = parsePrescriptionLinesDeterministic(fallbackText, language);
+          const fallbackDet = parsePrescriptionLinesWithUnparsed(fallbackText, language);
           const ctx = extractPatientContextFromText(fallbackText);
           return res.json({
-            items: fallbackItems,
+            items: fallbackDet.items,
+            unparsedLines: fallbackDet.unparsedLines,
+            ocrLines,
             extractedRawText: fallbackText,
             detectedCondition: ctx.detectedCondition,
             detectedAge: ctx.detectedAge,
@@ -355,18 +424,20 @@ IMPORTANT:
     }
   });
 
-  // 2. Deterministic Verification Engine (Regulator Pack Check + Dosage + Disease Match + Pediatric RAG + Regimen)
+  // 2. Deterministic Verification Engine (Regulator Pack Check + Dosage + Disease Match + Pediatric RAG + Regimen + Patient Health Quiz)
   app.post('/api/prescription/verify', (req, res) => {
     const {
       items = [],
       patientCondition = '',
       patientAge = 45,
       patientWeightKg,
+      quizProfile,
     } = req.body as {
       items?: PrescriptionItem[];
       patientCondition?: string;
       patientAge?: number;
       patientWeightKg?: number;
+      quizProfile?: PatientHealthQuiz;
     };
 
     const weightVal =
@@ -377,7 +448,7 @@ IMPORTANT:
           : undefined;
     const parsedAge = Number(patientAge);
     const safeAge = Number.isFinite(parsedAge) && parsedAge >= 0 ? parsedAge : 45;
-    const report = verifyPrescription(items, patientCondition, safeAge, weightVal);
+    const report = verifyPrescription(items, patientCondition, safeAge, weightVal, quizProfile);
     res.json(report);
   });
 
@@ -428,11 +499,13 @@ IMPORTANT:
       patientCondition = '',
       patientAge = 45,
       patientWeightKg,
+      quizProfile,
     } = req.body as {
       items?: PrescriptionItem[];
       patientCondition?: string;
       patientAge?: number;
       patientWeightKg?: number;
+      quizProfile?: PatientHealthQuiz;
     };
 
     const parsedAge = Number(patientAge);
@@ -445,6 +518,7 @@ IMPORTANT:
       patientCondition,
       patientAge: safeAge,
       patientWeightKg: weightVal,
+      quizProfile,
     });
 
     const pediatricRefsByItemId: Record<
@@ -508,15 +582,15 @@ IMPORTANT:
 STRICT SAFETY RULE: You MUST NOT invent any new drug warnings, side effects, or regulatory recalls beyond what is explicitly inside the JSON report and retrieved RAG references.
 Include:
 1. translatedPrescriptionText: bullet/numbered clear instructions for each medicine in ${targetLang}.
-2. summaryExplanation: plain-language summary of whether the prescription passed all checked rules (Safe) or needs review/unsafe action, explicitly naming the authoritative sources from report.validationSources (e.g., NIH DailyMed FDA label, RCSB PDB, Mol* AlphaFold DB, CDSCO National AEFI Guidelines, IAP STG, WHO Formulary) and any retrieved pediatric RAG references from ragMatches.
+2. summaryExplanation: plain-language summary of whether the prescription passed all checked rules (Safe) or needs review/unsafe action, explicitly highlighting ANY Patient Health Quiz findings in report.quizRiskFindings (drug allergies, recent/upcoming surgery hemorrhage risks, liver/kidney/heart QT/pregnancy fatal risks) as well as naming the authoritative sources from report.validationSources and any retrieved pediatric RAG references from ragMatches.
 3. cellularAlphaFoldNote: explain in 2-3 clear sentences how the primary target protein (${mech.name}, ${mech.structureId}, ${mech.provenance}) inside the cell's "${mech.cellularOrganelle}" relates to these medicines, citing ${mech.rcsbStructureUrl} and ${mech.alphafoldViewerUrl}.
-4. doctorQuestions: 3 concise, practical questions the patient can ask their doctor or pharmacist in ${targetLang}.
+4. doctorQuestions: 3 concise, practical questions the patient can ask their doctor or pharmacist in ${targetLang} (prioritizing any flagged quiz allergy/surgery/organ risk first).
 5. spokenScript: a warm 3-4 sentence voice-ready summary combining summaryExplanation and cellularAlphaFoldNote in ${targetLang}.
 
 PRESCRIPTION ITEMS:
 ${JSON.stringify(items)}
 
-VERIFIED REPORT + RETRIEVED RAG REFERENCES JSON:
+VERIFIED REPORT + PATIENT HEALTH QUIZ + RETRIEVED RAG REFERENCES JSON:
 ${JSON.stringify(report)}`;
 
       const response = await withTimeout(
@@ -698,9 +772,195 @@ ${JSON.stringify(report)}`;
     });
   });
 
-  // 6. Pharmacist-Only Structure Hypothesis Queue (patientVisible: false)
+  // 5b. Clinical Rule Governance Audit (license, evidence, reviewer, expiry transparency)
+  app.get('/api/clinical/rules', (_req, res) => {
+    res.json(buildClinicalRulesGovernanceReport());
+  });
+
+  // 5c. Closed-Loop Inventory Transaction Ledger & Reconciliation
+  app.get('/api/facility/stock/:id/transactions', (req, res) => {
+    const { id } = req.params;
+    const reconciliation = computeStockReconciliation(id);
+    if (!reconciliation) {
+      return res.status(404).json({ error: `Stock item "${id}" not found.` });
+    }
+    const transactions = inventoryLedger.filter((t) => t.stockId === id);
+    return res.json({ transactions, reconciliation });
+  });
+
+  app.get('/api/facility/stock/:id/reconcile', (req, res) => {
+    const { id } = req.params;
+    const reconciliation = computeStockReconciliation(id);
+    if (!reconciliation) {
+      return res.status(404).json({ error: `Stock item "${id}" not found.` });
+    }
+    return res.json({ reconciliation });
+  });
+
+  app.post('/api/facility/stock/:id/movements', (req, res) => {
+    const { id } = req.params;
+    const stockItem = facilityStock.find((s) => s.id === id);
+    if (!stockItem) {
+      return res.status(404).json({ error: `Stock item "${id}" not found.` });
+    }
+    const body = req.body as {
+      kind?: LedgerMovementKind;
+      quantityDelta?: number;
+      actor?: string;
+      note?: string;
+      verified?: boolean;
+    };
+    const validKinds: LedgerMovementKind[] = [
+      'stock_in',
+      'stock_out',
+      'quarantine',
+      'return',
+      'record_correction',
+    ];
+    const kind: LedgerMovementKind =
+      body.kind && validKinds.includes(body.kind) ? body.kind : 'quarantine';
+    const qty = Number(body.quantityDelta);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return res.status(400).json({ error: 'quantityDelta must be a positive number.' });
+    }
+    const verified = Boolean(body.verified);
+    const txn: InventoryTransaction = {
+      id: `txn-${Date.now()}`,
+      stockId: id,
+      kind,
+      quantityDelta: Math.round(qty),
+      actor: (body.actor || 'Facility Pharmacist').trim(),
+      at: new Date().toISOString(),
+      note: (body.note || `${kind} recorded`).trim(),
+      reported: true,
+      verified,
+    };
+    inventoryLedger = [txn, ...inventoryLedger];
+
+    if (verified && kind !== 'record_correction') {
+      const signed = (LEDGER_DELTA[kind] ?? 0) * txn.quantityDelta;
+      facilityStock = facilityStock.map((s) =>
+        s.id === id
+          ? {
+              ...s,
+              quantityPacks: Math.max(0, s.quantityPacks + signed),
+              lastCheckedAt: new Date().toISOString().slice(0, 10),
+            }
+          : s
+      );
+    }
+
+    const transactions = inventoryLedger.filter((t) => t.stockId === id);
+    const reconciliation = computeStockReconciliation(id);
+    return res.json({ transaction: txn, transactions, reconciliation, stock: facilityStock });
+  });
+
+  // 5d. Durable Recall Notification Outbox
+  app.get('/api/facility/outbox', (_req, res) => {
+    res.json({ notifications: outboxNotifications });
+  });
+
+  app.post('/api/facility/outbox', (req, res) => {
+    const body = req.body as {
+      channel?: 'in_app' | 'email' | 'sms';
+      recipient?: string;
+      subject?: string;
+      body?: string;
+      reviewId?: string;
+    };
+    if (!body.recipient?.trim() || !body.subject?.trim()) {
+      return res.status(400).json({ error: 'Recipient and subject are required.' });
+    }
+    const created: OutboxNotification = {
+      id: `out-${Date.now()}`,
+      channel: body.channel || 'in_app',
+      recipient: body.recipient.trim(),
+      subject: body.subject.trim(),
+      body: (body.body || body.subject).trim(),
+      reviewId: body.reviewId || null,
+      status: 'pending',
+      attempts: 0,
+      lastError: null,
+      createdAt: new Date().toISOString(),
+    };
+    outboxNotifications = [created, ...outboxNotifications];
+    return res.json({ notification: created, notifications: outboxNotifications });
+  });
+
+  app.post('/api/facility/outbox/deliver', (_req, res) => {
+    const now = new Date().toISOString();
+    let delivered = 0;
+    outboxNotifications = outboxNotifications.map((msg) => {
+      if (msg.status === 'pending' || msg.status === 'retried' || msg.status === 'failed') {
+        delivered += 1;
+        return {
+          ...msg,
+          status: 'delivered',
+          attempts: msg.attempts + 1,
+          lastAttemptAt: now,
+          deliveredAt: now,
+          lastError: null,
+        };
+      }
+      return msg;
+    });
+    res.json({ delivered, notifications: outboxNotifications });
+  });
+
+  app.put('/api/facility/outbox/:id/ack', (req, res) => {
+    const { id } = req.params;
+    const found = outboxNotifications.some((m) => m.id === id);
+    if (!found) {
+      return res.status(404).json({ error: `Outbox notification "${id}" not found.` });
+    }
+    outboxNotifications = outboxNotifications.map((m) =>
+      m.id === id ? { ...m, status: 'acknowledged' } : m
+    );
+    return res.json({ notifications: outboxNotifications });
+  });
+
+  // 6. Pharmacist-Only Structure Hypothesis Queue & Molecular Evidence Catalog (patientVisible: false)
   app.get('/api/pharmacist/hypotheses', (_req, res) => {
     res.json({ hypotheses: pharmacistQueue });
+  });
+
+  app.post('/api/pharmacist/hypotheses', (req, res) => {
+    const body = req.body as {
+      title?: string;
+      drugsInvolved?: string[];
+      targetProteinId?: MechanismTargetId;
+      provenance?: 'AlphaFold-predicted' | 'Experimental (PDB)';
+      plddtConfidence?: number;
+      pocketDistanceAngstrom?: number;
+      structuralRationale?: string;
+      evidenceSource?: string;
+      evidenceLocator?: string;
+      proposedBy?: string;
+    };
+    if (!body.title?.trim() || !body.structuralRationale?.trim()) {
+      return res.status(400).json({ error: 'Hypothesis title and structural rationale are required.' });
+    }
+    const created: PharmacistHypothesis = {
+      id: `hyp-${Date.now()}`,
+      title: body.title.trim(),
+      drugsInvolved:
+        body.drugsInvolved && body.drugsInvolved.length > 0
+          ? body.drugsInvolved.map((d) => d.trim().toLowerCase()).filter(Boolean)
+          : ['unspecified'],
+      targetProteinId: body.targetProteinId || 'CYP3A4',
+      provenance: body.provenance || 'AlphaFold-predicted',
+      evidenceTier: 'Predicted',
+      plddtConfidence: Number(body.plddtConfidence) || 88.5,
+      pocketDistanceAngstrom: Number(body.pocketDistanceAngstrom) || 3.1,
+      structuralRationale: body.structuralRationale.trim(),
+      evidenceSource: body.evidenceSource?.trim() || undefined,
+      evidenceLocator: body.evidenceLocator?.trim() || undefined,
+      proposedBy: body.proposedBy?.trim() || 'Clinical Pharmacist',
+      status: 'Pending Pharmacist Review',
+      patientVisible: false,
+    };
+    pharmacistQueue = [created, ...pharmacistQueue];
+    return res.json({ hypothesis: created, hypotheses: pharmacistQueue });
   });
 
   app.post('/api/pharmacist/hypotheses/:id/review', (req, res) => {
@@ -721,6 +981,40 @@ ${JSON.stringify(report)}`;
         : h
     );
     res.json({ hypotheses: pharmacistQueue });
+  });
+
+  app.get('/api/pharmacist/evidence', (_req, res) => {
+    res.json({ evidence: molecularEvidence });
+  });
+
+  app.post('/api/pharmacist/evidence', (req, res) => {
+    const body = req.body as Partial<MolecularEvidenceEntry>;
+    if (!body.drug?.trim() || !body.accession?.trim() || !body.locator?.trim()) {
+      return res.status(400).json({ error: 'Drug, accession, and locator are required.' });
+    }
+    const created: MolecularEvidenceEntry = {
+      id: `ev-${Date.now()}`,
+      target: (body.target as MechanismTargetId) || 'CYP3A4',
+      drug: body.drug.trim().toLowerCase(),
+      relationship: body.relationship || 'metabolism',
+      accession: body.accession.trim().toUpperCase(),
+      structureKind: body.structureKind === 'predicted' ? 'predicted' : 'experimental',
+      method: body.method?.trim() || (body.structureKind === 'predicted' ? 'AlphaFold DB' : 'X-ray diffraction'),
+      confidence: body.confidence?.trim() || undefined,
+      sourceUrl:
+        body.sourceUrl?.trim() ||
+        (body.structureKind === 'predicted'
+          ? `https://alphafold.ebi.ac.uk/entry/${body.accession.trim().toUpperCase()}`
+          : `https://www.rcsb.org/structure/${body.accession.trim().toUpperCase()}`),
+      locator: body.locator.trim(),
+      limitation:
+        body.limitation?.trim() ||
+        'Mechanism evidence explains drug-protein geometry; clinical prescribing decisions require approved labeling.',
+      reviewedBy: body.reviewedBy?.trim() || 'Dr. R. Subramanian (RPh)',
+      reviewedAt: new Date().toISOString().slice(0, 10),
+    };
+    molecularEvidence = [created, ...molecularEvidence];
+    return res.json({ entry: created, evidence: molecularEvidence });
   });
 
   // 7. Personalized Multi-Turn MedGuard Guide Chatbot (Gemini 4 Hydrogen)

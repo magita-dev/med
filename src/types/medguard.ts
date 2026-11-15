@@ -23,6 +23,10 @@ export interface PrescriptionItem {
   printedIndication?: string;
   rawLine: string;
   translatedLine?: string;
+  form?: string;
+  slots?: number[];
+  modifiers?: string[];
+  asNeeded?: boolean;
 }
 
 export interface PackCheckResult {
@@ -34,12 +38,28 @@ export interface PackCheckResult {
   asOfDate: string;
   alertId?: string;
   agency?: string;
+  kind?: 'nsq' | 'recall' | 'spurious' | 'prohibition';
+  evidenceStatus?: 'verified_alert' | 'historical_fixture' | 'synthetic';
+  locator?: string;
+  publishedDate?: string;
+  reviewedAt?: string;
+  sha256?: string;
+  verification?: {
+    sourceBytes: string;
+    transcription: string;
+    scope: string;
+  };
   reason?: string;
   sourceUrl?: string;
   criteria: {
     productMatch: boolean;
     manufacturerMatch: boolean;
     batchMatch: boolean;
+  };
+  noticeValues?: {
+    productName?: string;
+    manufacturer?: string;
+    batchNumber?: string;
   };
   evidenceTier: 'Verified';
 }
@@ -213,6 +233,64 @@ export interface ExternalValidationSource {
   relevance: string;
 }
 
+export type SurgicalHistoryStatus =
+  | 'none'
+  | 'recent_30_days'
+  | 'upcoming_within_14_days'
+  | 'active_bleeding_or_trauma';
+
+export type DrugAllergyId =
+  | 'penicillin_beta_lactam'
+  | 'nsaid_aspirin'
+  | 'macrolide'
+  | 'sulfa'
+  | 'statin_myopathy'
+  | 'fluoroquinolone'
+  | 'paracetamol';
+
+export type FatalRiskFactorId =
+  | 'severe_liver_disease'
+  | 'severe_kidney_ckd'
+  | 'gi_ulcer_or_bleed'
+  | 'anticoagulant_therapy'
+  | 'cardiac_qt_or_arrhythmia'
+  | 'pregnancy_or_breastfeeding'
+  | 'asthma_or_nsaid_triad'
+  | 'chronic_alcohol_use'
+  | 'dehydration_or_sepsis';
+
+export interface PatientHealthQuiz {
+  decision: 'pending' | 'taken' | 'skipped';
+  completed: boolean;
+  completedAt?: string;
+  patientAge?: number;
+  patientWeightKg?: number;
+  surgeryStatus: SurgicalHistoryStatus;
+  surgeryDetails?: string;
+  allergies: DrugAllergyId[];
+  customAllergies: string;
+  fatalRiskFactors: FatalRiskFactorId[];
+  currentMedicationsNote?: string;
+  additionalHistoryNote?: string;
+}
+
+export interface QuizRiskFinding {
+  id: string;
+  category:
+    | 'Drug Allergy / Anaphylaxis'
+    | 'Recent Surgery / Bleeding Risk'
+    | 'Fatal Organ / Systemic Risk'
+    | 'Pregnancy / Teratogenic Risk';
+  severity: 'Fatal Risk' | 'Critical' | 'Caution';
+  title: string;
+  drugsInvolved: string[];
+  matchedQuizFactor: string;
+  clinicalSummary: string;
+  recommendedAction: string;
+  source: string;
+  mechanismTargetId?: MechanismTargetId;
+}
+
 export interface VerificationReport {
   overallVerdict: OverallVerdictStatus;
   verdictHeadline: string;
@@ -226,14 +304,20 @@ export interface VerificationReport {
   diseaseAudits: DiseaseMatchAudit[];
   regimenFindings: RegimenFinding[];
   ragMatches: RagRetrievedMatch[];
+  quizProfile?: PatientHealthQuiz;
+  quizRiskFindings?: QuizRiskFinding[];
   primaryMechanismId: MechanismTargetId;
   validationSources?: ExternalValidationSource[];
+  checksRan?: number;
+  checksNotRun?: number;
+  limitedCoverage?: boolean;
   summaryStats: {
     packAlerts: number;
     dosageIssues: number;
     diseaseMismatches: number;
     regimenFlags: number;
     ragFlags: number;
+    quizRiskFlags?: number;
   };
 }
 
@@ -288,6 +372,16 @@ export interface RegulatorAlertRecord {
   batchNumbers: string[];
   reason: string;
   severity: 'Recall' | 'NSQ Alert' | 'Falsified';
+  kind?: 'nsq' | 'recall' | 'spurious' | 'prohibition';
+  evidenceStatus?: 'verified_alert' | 'historical_fixture' | 'synthetic';
+  locator?: string;
+  sha256?: string;
+  reviewedAt?: string;
+  verification?: {
+    sourceBytes: string;
+    transcription: string;
+    scope: string;
+  };
   sourceUrl: string;
 }
 
@@ -314,6 +408,57 @@ export interface ReverseMatchHit {
   reason: string;
 }
 
+export type LedgerMovementKind =
+  | 'stock_in'
+  | 'stock_out'
+  | 'quarantine'
+  | 'return'
+  | 'record_correction';
+
+export interface InventoryTransaction {
+  id: string;
+  stockId: string;
+  kind: LedgerMovementKind;
+  quantityDelta: number;
+  actor: string;
+  at: string;
+  note: string;
+  reported: boolean;
+  verified: boolean;
+}
+
+export interface InventoryReconciliation {
+  stockId: string;
+  expectedQuantity: number;
+  ledgerQuantity: number;
+  matchesRecord: boolean;
+  verifiedMovements: number;
+  reportedUnverifiedMovements: number;
+  allVerified: boolean;
+}
+
+export type OutboxMessageStatus =
+  | 'pending'
+  | 'delivered'
+  | 'failed'
+  | 'retried'
+  | 'acknowledged';
+
+export interface OutboxNotification {
+  id: string;
+  channel: 'in_app' | 'email' | 'sms';
+  recipient: string;
+  subject: string;
+  body: string;
+  reviewId?: string | null;
+  status: OutboxMessageStatus;
+  attempts: number;
+  lastError?: string | null;
+  createdAt: string;
+  lastAttemptAt?: string;
+  deliveredAt?: string;
+}
+
 export interface PharmacistHypothesis {
   id: string;
   title: string;
@@ -324,10 +469,52 @@ export interface PharmacistHypothesis {
   plddtConfidence: number;
   pocketDistanceAngstrom: number;
   structuralRationale: string;
+  evidenceSource?: string;
+  evidenceLocator?: string;
+  proposedBy?: string;
   status: 'Pending Pharmacist Review' | 'Escalated for Clinical Check' | 'Dismissed';
   reviewedBy?: string;
   reviewedAt?: string;
   patientVisible: false;
+}
+
+export interface MolecularEvidenceEntry {
+  id: string;
+  target: MechanismTargetId;
+  drug: string;
+  relationship: 'metabolism' | 'inhibition' | 'induction' | 'target' | 'transport';
+  accession: string;
+  structureKind: 'experimental' | 'predicted';
+  method: string;
+  confidence?: string;
+  sourceUrl: string;
+  locator: string;
+  limitation: string;
+  reviewedBy: string;
+  reviewedAt: string;
+}
+
+export interface GovernedRuleAuditRow {
+  id: string;
+  kind: 'interaction' | 'geriatric' | 'prohibition' | 'dose_ceiling' | 'indication';
+  ingredients: string[];
+  jurisdiction: string;
+  license: string;
+  governed: boolean;
+  missing: string[];
+  expired: boolean;
+  reviewedBy: string;
+  reviewedAt: string;
+  reReviewAt: string;
+  source: string;
+}
+
+export interface ClinicalRulesGovernanceReport {
+  total: number;
+  governed: number;
+  notGoverned: number;
+  expiredCount: number;
+  rules: GovernedRuleAuditRow[];
 }
 
 export interface SamplePreset {
@@ -342,6 +529,7 @@ export interface SamplePreset {
 
 export type AppPageId =
   | 'home'
+  | 'quiz'
   | 'scan'
   | 'remediation'
   | 'test-cases'
@@ -407,6 +595,7 @@ export interface RemediationPlan {
   triggerSummary: string;
   dosageMatchStatusSummary: string;
   diseaseMatchStatusSummary: string;
+  quizRiskStatusSummary?: string;
   patientCondition: string;
   patientAge: number;
   patientWeightKg?: number;
@@ -427,6 +616,11 @@ export interface GuideChatContext {
   persona?: GuideUserPersona;
   savedChecksCount?: number;
   recentSavedSummary?: string;
+  quizSummary?: {
+    completed: boolean;
+    decision: PatientHealthQuiz['decision'];
+    summaryText: string;
+  };
   latestReport?: {
     overallVerdict: OverallVerdictStatus;
     patientCondition: string;
@@ -436,6 +630,7 @@ export interface GuideChatContext {
     dosageIssues: number;
     regimenFlags: number;
     packAlerts: number;
+    quizRiskFlags?: number;
   };
 }
 

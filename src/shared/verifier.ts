@@ -8,7 +8,9 @@ import type {
   MultilingualExplanation,
   OverallVerdictStatus,
   PackCheckResult,
+  PatientHealthQuiz,
   PrescriptionItem,
+  QuizRiskFinding,
   RagClinicalRecord,
   RagRetrievedMatch,
   RegimenFinding,
@@ -16,6 +18,11 @@ import type {
   ReverseMatchHit,
   VerificationReport,
 } from '../types/medguard.ts';
+import {
+  DRUG_ALLERGY_OPTIONS,
+  FATAL_RISK_FACTOR_OPTIONS,
+  SURGICAL_STATUS_OPTIONS,
+} from '../data/healthQuizCatalog.ts';
 import {
   BANNED_FDC_RULES,
   CONDITION_SYNONYMS,
@@ -78,12 +85,24 @@ export function verifyPackItem(
         asOfDate: DATASET_AS_OF_DATE,
         alertId: alert.id,
         agency: alert.agency,
+        kind: alert.kind ?? 'nsq',
+        evidenceStatus: alert.evidenceStatus ?? 'verified_alert',
+        locator: alert.locator,
+        publishedDate: alert.date,
+        reviewedAt: alert.reviewedAt,
+        sha256: alert.sha256,
+        verification: alert.verification,
         reason: alert.reason,
         sourceUrl: alert.sourceUrl,
         criteria: {
           productMatch: true,
           manufacturerMatch,
           batchMatch: true,
+        },
+        noticeValues: {
+          productName: alert.productName,
+          manufacturer: alert.manufacturer,
+          batchNumber: alert.batchNumbers.join(', '),
         },
         evidenceTier: 'Verified',
       };
@@ -98,12 +117,24 @@ export function verifyPackItem(
       asOfDate: DATASET_AS_OF_DATE,
       alertId: alert.id,
       agency: alert.agency,
+      kind: alert.kind ?? 'nsq',
+      evidenceStatus: alert.evidenceStatus ?? 'verified_alert',
+      locator: alert.locator,
+      publishedDate: alert.date,
+      reviewedAt: alert.reviewedAt,
+      sha256: alert.sha256,
+      verification: alert.verification,
       reason: `${alert.reason} (Alerted batch: ${alert.batchNumbers.join(', ')})`,
       sourceUrl: alert.sourceUrl,
       criteria: {
         productMatch: true,
         manufacturerMatch,
         batchMatch: false,
+      },
+      noticeValues: {
+        productName: alert.productName,
+        manufacturer: alert.manufacturer,
+        batchNumber: alert.batchNumbers.join(', '),
       },
       evidenceTier: 'Verified',
     };
@@ -514,16 +545,384 @@ export function auditDiseaseMatch(
   };
 }
 
+function itemMatchesKeywords(item: PrescriptionItem, keywords: string[]): boolean {
+  const brand = norm(item.brandName);
+  const ings = item.activeIngredients.map(norm);
+  return keywords.some((kw) => {
+    const k = norm(kw);
+    return (
+      k.length >= 3 &&
+      (brand.includes(k) || ings.some((ing) => ing.includes(k) || k.includes(ing)))
+    );
+  });
+}
+
+export function evaluateQuizRisks(
+  items: PrescriptionItem[],
+  quizProfile?: PatientHealthQuiz
+): QuizRiskFinding[] {
+  if (!quizProfile) return [];
+  const findings: QuizRiskFinding[] = [];
+  const seenIds = new Set<string>();
+  const addFinding = (f: QuizRiskFinding) => {
+    if (seenIds.has(f.id)) return;
+    seenIds.add(f.id);
+    findings.push(f);
+  };
+
+  // 1. Drug Allergies & Cross-Reactivity (Fatal Anaphylaxis / Hypersensitivity)
+  for (const allergyId of quizProfile.allergies ?? []) {
+    const meta = DRUG_ALLERGY_OPTIONS.find((a) => a.id === allergyId);
+    if (!meta) continue;
+    const matchedItems = items.filter((item) =>
+      itemMatchesKeywords(item, meta.matchedIngredients)
+    );
+    if (matchedItems.length > 0) {
+      addFinding({
+        id: `quiz-allergy-${allergyId}`,
+        category: 'Drug Allergy / Anaphylaxis',
+        severity: 'Fatal Risk',
+        title: `ALLERGY MATCH — ${meta.label.en}`,
+        drugsInvolved: matchedItems.map((i) => i.brandName),
+        matchedQuizFactor: meta.label.en,
+        clinicalSummary: `Patient safety quiz reported "${meta.label.en}". ${meta.fatalWarningHint.en}`,
+        recommendedAction: `DO NOT TAKE ${matchedItems.map((i) => i.brandName).join(', ')}. Contact your prescriber immediately for a non-cross-reactive alternative.`,
+        source: meta.source,
+        mechanismTargetId: meta.mechanismTargetId,
+      });
+    }
+  }
+
+  // Custom user-typed allergies & current blood-thinner / drug notes
+  const customTokens = (quizProfile.customAllergies || '')
+    .split(/[,;\n/]+/)
+    .map((t) => norm(t))
+    .filter((t) => t.length >= 3);
+  for (const token of customTokens) {
+    const matchedItems = items.filter((item) => itemMatchesKeywords(item, [token]));
+    if (matchedItems.length > 0) {
+      addFinding({
+        id: `quiz-custom-allergy-${token}`,
+        category: 'Drug Allergy / Anaphylaxis',
+        severity: 'Fatal Risk',
+        title: `CUSTOM ALLERGY MATCH — "${token}"`,
+        drugsInvolved: matchedItems.map((i) => i.brandName),
+        matchedQuizFactor: `Reported Allergy: ${token}`,
+        clinicalSummary: `Your health quiz lists "${token}" as an allergy/intolerance, which matches ${matchedItems.map((i) => i.brandName).join(', ')}. Re-exposure risks fatal anaphylaxis or organ injury.`,
+        recommendedAction: `Hold ${matchedItems.map((i) => i.brandName).join(', ')} and request an urgent substitute from your doctor.`,
+        source: 'Patient Health Safety Quiz Allergy Screen',
+      });
+    }
+  }
+
+  // 2. Recent / Upcoming Surgery & Active Bleeding Screening
+  if (quizProfile.surgeryStatus && quizProfile.surgeryStatus !== 'none') {
+    const surgMeta = SURGICAL_STATUS_OPTIONS.find((s) => s.id === quizProfile.surgeryStatus);
+    const surgLabel = surgMeta?.label.en ?? quizProfile.surgeryStatus;
+    const surgNote = quizProfile.surgeryDetails?.trim()
+      ? ` (${quizProfile.surgeryDetails.trim()})`
+      : '';
+
+    const nsaidOrAntiplateletItems = items.filter((item) =>
+      itemMatchesKeywords(item, [
+        'ibuprofen',
+        'diclofenac',
+        'nimesulide',
+        'etodolac',
+        'aspirin',
+        'naproxen',
+        'ketorolac',
+        'aceclofenac',
+        'clopidogrel',
+      ])
+    );
+    if (nsaidOrAntiplateletItems.length > 0) {
+      addFinding({
+        id: `quiz-surgery-bleed-${quizProfile.surgeryStatus}`,
+        category: 'Recent Surgery / Bleeding Risk',
+        severity: 'Fatal Risk',
+        title: `SURGICAL HEMORRHAGE RISK — NSAID / Antiplatelet Alongside ${surgLabel}`,
+        drugsInvolved: nsaidOrAntiplateletItems.map((i) => i.brandName),
+        matchedQuizFactor: `${surgLabel}${surgNote}`,
+        clinicalSummary: `Patient quiz flagged "${surgLabel}${surgNote}". COX-1/COX-2 inhibition and platelet dysfunction from ${nsaidOrAntiplateletItems.map((i) => i.brandName).join(', ')} can cause severe post-operative bleeding, anastomotic leak, or fatal internal hemorrhage.`,
+        recommendedAction:
+          'Confirm directly with your surgeon before taking any NSAID, aspirin, or blood-thinning medicine around surgery.',
+        source: 'Perioperative Medication Safety Guidelines (ASA / NICE NG180)',
+        mechanismTargetId: 'COX2',
+      });
+    }
+
+    const metforminItems = items.filter((item) => itemMatchesKeywords(item, ['metformin']));
+    if (metforminItems.length > 0) {
+      addFinding({
+        id: `quiz-surgery-metformin-${quizProfile.surgeryStatus}`,
+        category: 'Recent Surgery / Bleeding Risk',
+        severity: 'Critical',
+        title: `PERIOPERATIVE LACTIC ACIDOSIS HOLD — Metformin (${surgLabel})`,
+        drugsInvolved: metforminItems.map((i) => i.brandName),
+        matchedQuizFactor: `${surgLabel}${surgNote}`,
+        clinicalSummary: `Around recent or upcoming surgery${surgNote} (NPO fasting, anesthesia, contrast dyes, or hemodynamic stress), Metformin carries a serious risk of fatal Metformin-Associated Lactic Acidosis (MALA) via AMPK/mitochondrial complex I inhibition.`,
+        recommendedAction:
+          'Ask your surgeon/anesthesiologist whether Metformin must be temporarily held 24–48 hours around surgery and until kidney perfusion & oral intake stabilize.',
+        source: 'FDA Metformin Boxed Warning (Surgery / Contrast / Hypoxia) · ADA Standards',
+        mechanismTargetId: 'AMPK',
+      });
+    }
+  }
+
+  // 3. Fatal-End Organ & Systemic Health Factors
+  const factors = quizProfile.fatalRiskFactors ?? [];
+  const factorMeta = (id: string) => FATAL_RISK_FACTOR_OPTIONS.find((f) => f.id === id);
+
+  // 3a. Severe Liver Disease or Chronic Alcohol -> Paracetamol, Nimesulide, Statins
+  if (factors.includes('severe_liver_disease') || factors.includes('chronic_alcohol_use')) {
+    const isAlcoholOnly =
+      !factors.includes('severe_liver_disease') && factors.includes('chronic_alcohol_use');
+    const factorTitle = factors.includes('severe_liver_disease')
+      ? factorMeta('severe_liver_disease')!.label.en
+      : factorMeta('chronic_alcohol_use')!.label.en;
+
+    const paracetamolItems = items.filter((item) => itemMatchesKeywords(item, ['paracetamol', 'acetaminophen']));
+    for (const pItem of paracetamolItems) {
+      const dailyMg = pItem.totalDailyMg || pItem.strengthMg * Math.max(1, pItem.frequencyPerDay);
+      if (factors.includes('severe_liver_disease') || dailyMg > 2000) {
+        addFinding({
+          id: `quiz-liver-pcm-${pItem.id}`,
+          category: 'Fatal Organ / Systemic Risk',
+          severity: dailyMg > 2000 || factors.includes('severe_liver_disease') ? 'Fatal Risk' : 'Critical',
+          title: `HEPATOTOXICITY / FULMINANT LIVER FAILURE RISK — ${pItem.brandName}`,
+          drugsInvolved: [pItem.brandName],
+          matchedQuizFactor: factorTitle,
+          clinicalSummary: isAlcoholOnly
+            ? `With regular alcohol use, hepatic glutathione is depleted; ${pItem.brandName} at ${dailyMg} mg/day exceeds the 2,000 mg/day alcohol-adjusted hepatic ceiling and can cause fatal liver necrosis.`
+            : `In severe liver disease/cirrhosis, glutathione stores and hepatic clearance of Paracetamol (${dailyMg} mg/day) are severely impaired, risking fatal acute liver failure.`,
+          recommendedAction:
+            'Do not exceed clinician-approved reduced dosing (strictly ≤ 2,000 mg/day or avoid in decompensated cirrhosis). Seek urgent care for nausea, right upper abdominal pain, or jaundice.',
+          source: 'FDA Acetaminophen Hepatotoxicity Warning / ACG Liver Guidelines',
+          mechanismTargetId: 'CYP3A4',
+        });
+      }
+    }
+
+    const nimesulideItems = items.filter((item) => itemMatchesKeywords(item, ['nimesulide']));
+    if (nimesulideItems.length > 0) {
+      addFinding({
+        id: 'quiz-liver-nimesulide',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `FULMINANT HEPATIC NECROSIS CONTRAINDICATION — Nimesulide`,
+        drugsInvolved: nimesulideItems.map((i) => i.brandName),
+        matchedQuizFactor: factorTitle,
+        clinicalSummary: `Nimesulide carries a documented black-box risk of idiosyncratic fulminant hepatic failure and is strictly contraindicated with liver disease or alcohol exposure.`,
+        recommendedAction: 'STOP Nimesulide immediately and ask your prescriber for a non-hepatotoxic option.',
+        source: 'CDSCO / EMA Nimesulide Hepatotoxicity Restriction',
+        mechanismTargetId: 'COX2',
+      });
+    }
+
+    const statinItems = items.filter((item) =>
+      itemMatchesKeywords(item, ['atorvastatin', 'simvastatin', 'rosuvastatin'])
+    );
+    if (statinItems.length > 0 && factors.includes('severe_liver_disease')) {
+      addFinding({
+        id: 'quiz-liver-statin',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `ACTIVE LIVER DISEASE CONTRAINDICATION — Statin Therapy`,
+        drugsInvolved: statinItems.map((i) => i.brandName),
+        matchedQuizFactor: factorTitle,
+        clinicalSummary: `Statins undergo extensive hepatic CYP3A4 metabolism and are contraindicated in active liver disease or unexplained persistent transaminase elevation.`,
+        recommendedAction: 'Hold statin until liver enzymes (ALT/AST/bilirubin) are reviewed by your doctor.',
+        source: 'FDA Statin Prescribing Information (Active Hepatic Disease Contraindication)',
+        mechanismTargetId: 'CYP3A4',
+      });
+    }
+  }
+
+  // 3b. Severe Kidney Failure / CKD -> Metformin, NSAIDs, Telmisartan
+  if (factors.includes('severe_kidney_ckd') || factors.includes('dehydration_or_sepsis')) {
+    const isDehydrationOnly =
+      !factors.includes('severe_kidney_ckd') && factors.includes('dehydration_or_sepsis');
+    const factorLabel = factors.includes('severe_kidney_ckd')
+      ? factorMeta('severe_kidney_ckd')!.label.en
+      : factorMeta('dehydration_or_sepsis')!.label.en;
+
+    const metforminItems = items.filter((item) => itemMatchesKeywords(item, ['metformin']));
+    if (metforminItems.length > 0) {
+      addFinding({
+        id: 'quiz-renal-metformin',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `FATAL LACTIC ACIDOSIS (MALA) RISK — Metformin`,
+        drugsInvolved: metforminItems.map((i) => i.brandName),
+        matchedQuizFactor: factorLabel,
+        clinicalSummary: isDehydrationOnly
+          ? `Severe dehydration/sepsis drops kidney filtration rapidly, causing Metformin accumulation and life-threatening lactic acidosis.`
+          : `Metformin is contraindicated in severe renal impairment (eGFR < 30 mL/min/1.73m²) because renal failure triggers fatal Metformin-Associated Lactic Acidosis (MALA).`,
+        recommendedAction:
+          'Hold Metformin and verify latest serum creatinine / eGFR with your doctor before taking another dose.',
+        source: 'FDA Metformin Boxed Warning (Renal Impairment / MALA) · ADA Standards',
+        mechanismTargetId: 'AMPK',
+      });
+    }
+
+    const nsaidItems = items.filter((item) =>
+      itemMatchesKeywords(item, ['ibuprofen', 'diclofenac', 'nimesulide', 'etodolac', 'aspirin', 'naproxen'])
+    );
+    if (nsaidItems.length > 0) {
+      addFinding({
+        id: 'quiz-renal-nsaid',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `ACUTE KIDNEY SHUTDOWN / HEMORRHAGE RISK — NSAID`,
+        drugsInvolved: nsaidItems.map((i) => i.brandName),
+        matchedQuizFactor: factorLabel,
+        clinicalSummary: isDehydrationOnly
+          ? `In severe dehydration or suspected dengue, NSAIDs constrict renal blood flow causing acute kidney injury AND worsen fatal hemorrhagic bleeding.`
+          : `In CKD/dialysis, NSAIDs block renal vasodilatory prostaglandins via COX-2/COX-1, precipitating acute-on-chronic kidney failure and hyperkalemia.`,
+        recommendedAction: 'Avoid NSAIDs completely and consult your physician for a kidney-safe analgesic.',
+        source: 'KDIGO CKD Guideline / WHO Dengue & Dehydration Safety Advisory',
+        mechanismTargetId: 'COX2',
+      });
+    }
+  }
+
+  // 3c. Cardiac Arrhythmia / Long QT -> Azithromycin, Clarithromycin, Domperidone, Ciprofloxacin
+  if (factors.includes('cardiac_qt_or_arrhythmia')) {
+    const qtItems = items.filter((item) =>
+      itemMatchesKeywords(item, ['azithromycin', 'clarithromycin', 'domperidone', 'ciprofloxacin', 'levofloxacin'])
+    );
+    if (qtItems.length > 0) {
+      addFinding({
+        id: 'quiz-cardiac-qt',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `FATAL TORSADES DE POINTES / hERG QT PROLONGATION RISK`,
+        drugsInvolved: qtItems.map((i) => i.brandName),
+        matchedQuizFactor: factorMeta('cardiac_qt_or_arrhythmia')!.label.en,
+        clinicalSummary: `With pre-existing heart rhythm / Long QT / heart failure history, ${qtItems.map((i) => i.brandName).join(', ')} block cardiac hERG (Kv11.1) potassium channels and can trigger fatal ventricular arrhythmia (Torsades de Pointes).`,
+        recommendedAction:
+          'Do NOT take until cleared by your cardiologist/prescriber with a baseline ECG and serum K+/Mg2+ check.',
+        source: 'CredibleMeds® QT Drug Registry / FDA Cardiac Arrhythmia Warning',
+        mechanismTargetId: 'HERG',
+      });
+    }
+  }
+
+  // 3d. GI Ulcer or Blood Thinners (from checkbox OR typed current meds note) -> NSAIDs / Aspirin
+  const typedBloodThinner = /\b(warfarin|clopidogrel|apixaban|rivaroxaban|dabigatran|heparin|enoxaparin|ecosprin)\b/i.test(
+    quizProfile.currentMedicationsNote || ''
+  );
+  if (
+    factors.includes('gi_ulcer_or_bleed') ||
+    factors.includes('anticoagulant_therapy') ||
+    typedBloodThinner
+  ) {
+    const nsaidItems = items.filter((item) =>
+      itemMatchesKeywords(item, ['ibuprofen', 'diclofenac', 'nimesulide', 'etodolac', 'aspirin', 'naproxen'])
+    );
+    if (nsaidItems.length > 0) {
+      const matchedLabel = factors.includes('gi_ulcer_or_bleed')
+        ? factorMeta('gi_ulcer_or_bleed')!.label.en
+        : factors.includes('anticoagulant_therapy')
+          ? factorMeta('anticoagulant_therapy')!.label.en
+          : `Blood thinner noted (${quizProfile.currentMedicationsNote})`;
+      addFinding({
+        id: 'quiz-gi-bleed-nsaid',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `LIFE-THREATENING GI / INTERNAL BLEED RISK — NSAID + Ulcer / Anticoagulant`,
+        drugsInvolved: nsaidItems.map((i) => i.brandName),
+        matchedQuizFactor: matchedLabel,
+        clinicalSummary: `NSAIDs erode protective gastric prostaglandins (COX-1/COX-2) and impair platelet clotting, multiplying the risk of fatal gastrointestinal hemorrhage or perforation.`,
+        recommendedAction:
+          'Avoid unmonitored NSAID use and consult your physician immediately regarding stomach-safe alternatives or gastroprotection.',
+        source: 'FDA Black-Box GI Bleeding Warning for NSAIDs / NICE NG5',
+        mechanismTargetId: 'COX2',
+      });
+    }
+  }
+
+  // 3e. Asthma / NSAID Triad -> NSAIDs / Aspirin
+  if (factors.includes('asthma_or_nsaid_triad')) {
+    const nsaidItems = items.filter((item) =>
+      itemMatchesKeywords(item, ['ibuprofen', 'diclofenac', 'nimesulide', 'etodolac', 'aspirin', 'naproxen'])
+    );
+    if (nsaidItems.length > 0) {
+      addFinding({
+        id: 'quiz-asthma-nsaid',
+        category: 'Fatal Organ / Systemic Risk',
+        severity: 'Fatal Risk',
+        title: `FATAL BRONCHOSPASM RISK — NSAID-Exacerbated Asthma (AERD)`,
+        drugsInvolved: nsaidItems.map((i) => i.brandName),
+        matchedQuizFactor: factorMeta('asthma_or_nsaid_triad')!.label.en,
+        clinicalSummary: `In severe asthma or aspirin-sensitive respiratory disease, COX-1/COX-2 NSAIDs shunt arachidonic acid toward leukotrienes, triggering acute life-threatening bronchospasm.`,
+        recommendedAction:
+          'Do not take this NSAID without prior tolerability confirmation from your asthma specialist.',
+        source: 'GINA Asthma Guideline / FDA NSAID Bronchospasm Contraindication',
+        mechanismTargetId: 'COX2',
+      });
+    }
+  }
+
+  // 3f. Pregnancy / Breastfeeding -> Statins, NSAIDs, ARBs (Telmisartan), Fluoroquinolones
+  if (factors.includes('pregnancy_or_breastfeeding')) {
+    const pregContraItems = items.filter((item) =>
+      itemMatchesKeywords(item, [
+        'atorvastatin',
+        'simvastatin',
+        'rosuvastatin',
+        'telmisartan',
+        'losartan',
+        'ibuprofen',
+        'diclofenac',
+        'nimesulide',
+        'etodolac',
+        'ciprofloxacin',
+      ])
+    );
+    if (pregContraItems.length > 0) {
+      addFinding({
+        id: 'quiz-pregnancy-teratogen',
+        category: 'Pregnancy / Teratogenic Risk',
+        severity: 'Fatal Risk',
+        title: `PREGNANCY / LACTATION CONTRAINDICATION — Fetal Toxicity Risk`,
+        drugsInvolved: pregContraItems.map((i) => i.brandName),
+        matchedQuizFactor: factorMeta('pregnancy_or_breastfeeding')!.label.en,
+        clinicalSummary: `Medicines such as ARBs (Telmisartan), Statins, Fluoroquinolones, and NSAIDs carry major pregnancy/lactation warnings including fetal renal toxicity, premature ductus arteriosus closure, or developmental harm.`,
+        recommendedAction:
+          'Hold non-cleared medicines and contact your obstetrician immediately before taking any dose.',
+        source: 'FDA Pregnancy & Lactation Labeling Rule (PLLR) / WHO Formulary',
+        mechanismTargetId: pregContraItems.some((i) =>
+          itemMatchesKeywords(i, ['atorvastatin', 'simvastatin'])
+        )
+          ? 'CYP3A4'
+          : 'COX2',
+      });
+    }
+  }
+
+  return findings;
+}
+
 export function verifyPrescription(
   items: PrescriptionItem[],
   patientCondition: string,
   patientAge: number,
-  patientWeightKg?: number
+  patientWeightKg?: number,
+  quizProfile?: PatientHealthQuiz
 ): VerificationReport {
+  const effectiveWeight =
+    patientWeightKg && patientWeightKg > 0
+      ? patientWeightKg
+      : quizProfile?.patientWeightKg && quizProfile.patientWeightKg > 0
+        ? quizProfile.patientWeightKg
+        : undefined;
   const packChecks = items.map((item) => verifyPackItem(item));
-  const dosageAudits = items.map((item) => auditItemDosage(item, patientAge, patientWeightKg));
+  const dosageAudits = items.map((item) => auditItemDosage(item, patientAge, effectiveWeight));
   const diseaseAudits = items.map((item) => auditDiseaseMatch(item, patientCondition));
-  const ragMatches = retrieveRagMatches(items, patientAge, patientWeightKg);
+  const ragMatches = retrieveRagMatches(items, patientAge, effectiveWeight);
+  const quizRiskFindings = evaluateQuizRisks(items, quizProfile);
   const regimenFindings: RegimenFinding[] = [];
 
   // 1. Drug-Drug Interactions (pairwise)
@@ -647,44 +1046,61 @@ export function verifyPrescription(
     (d) => d.status !== 'Matches Condition'
   ).length;
   const ragFlags = ragMatches.filter((m) => Boolean(m.triggeredUnsafeRecord)).length;
+  const quizFatalOrCritical = quizRiskFindings.filter(
+    (q) => q.severity === 'Fatal Risk' || q.severity === 'Critical'
+  ).length;
+  const quizRiskFlags = quizRiskFindings.length;
   const criticalFindings = regimenFindings.filter((f) => f.severity === 'Critical').length;
   const hasConfirmedPackAlert = packChecks.some((p) => p.tier === 'Confirmed');
 
   let overallVerdict: OverallVerdictStatus = 'SAFE_TO_TAKE';
   let verdictHeadline = 'Safe to Consume — Verified Within Rules';
-  let verdictQualifier = `Every extracted medicine matches "${patientCondition}" and falls within age-specific (${patientAge} yrs) dosage ceilings with zero regulator alerts or clashes as of ${DATASET_AS_OF_DATE}.`;
+  let verdictQualifier =
+    quizProfile?.completed
+      ? `Every extracted medicine matches "${patientCondition}", clears your Patient Health & Fatal-Risk Quiz (allergies, surgery & organ profile), and falls within age-specific (${patientAge} yrs) dosage ceilings as of ${DATASET_AS_OF_DATE}.`
+      : `Every extracted medicine matches "${patientCondition}" and falls within age-specific (${patientAge} yrs) dosage ceilings with zero regulator alerts or clashes as of ${DATASET_AS_OF_DATE}.`;
 
   if (
     items.length === 0 ||
     hasConfirmedPackAlert ||
     criticalFindings > 0 ||
+    quizFatalOrCritical > 0 ||
     dosageAudits.some(
       (d) => d.status === 'High / Overdose Risk' || d.status === 'Pediatric Contraindication'
     )
   ) {
     overallVerdict = 'ACTION_REQUIRED';
-    verdictHeadline = 'Action Required — Safety Issue Detected';
+    verdictHeadline =
+      quizFatalOrCritical > 0
+        ? 'FATAL / CRITICAL RISK DETECTED — Patient Health Quiz Contraindication'
+        : 'Action Required — Safety Issue Detected';
     verdictQualifier =
-      'Do not stop or alter prescribed medicines on your own; show this audit report to your prescribing doctor or pharmacist immediately.';
+      quizFatalOrCritical > 0
+        ? `Combined Patient Safety Quiz & Scanner flagged ${quizFatalOrCritical} life-threatening allergy, recent surgery, or organ-risk conflict(s): ${quizRiskFindings[0]?.title}. Show this combined audit to your prescribing doctor, surgeon, or pharmacist immediately before taking any dose.`
+        : 'Do not stop or alter prescribed medicines on your own; show this audit report to your prescribing doctor or pharmacist immediately.';
   } else if (
     packAlerts > 0 ||
     dosageIssues > 0 ||
     diseaseMismatches > 0 ||
     regimenFindings.length > 0 ||
-    ragFlags > 0
+    ragFlags > 0 ||
+    quizRiskFlags > 0
   ) {
     overallVerdict = 'CAUTION_REVIEW';
     verdictHeadline = 'Caution — Review Required Before Consuming';
     verdictQualifier =
       patientAge < 18
         ? 'Pediatric regimen requires weight (kg), formulation strength, dose per administration, and dosing-interval verification against CDSCO / IAP / WHO references.'
-        : 'One or more medicines could not be fully matched against your stated disease, patient age, dosage limits, or batch records. Confirm with your doctor or pharmacist.';
+        : 'One or more medicines could not be fully matched against your stated disease, patient health quiz, dosage limits, or batch records. Confirm with your doctor or pharmacist.';
   }
 
   // Pick most relevant cellular mechanism target for AlphaFold Mechanism Lens
   let primaryMechanismId: MechanismTargetId = 'AMPK';
+  const quizWithTarget = quizRiskFindings.find((q) => q.mechanismTargetId);
   const findingWithTarget = regimenFindings.find((f) => f.mechanismTargetId);
-  if (findingWithTarget?.mechanismTargetId) {
+  if (quizWithTarget?.mechanismTargetId) {
+    primaryMechanismId = quizWithTarget.mechanismTargetId;
+  } else if (findingWithTarget?.mechanismTargetId) {
     primaryMechanismId = findingWithTarget.mechanismTargetId;
   } else if (ragMatches[0]?.matchedRecord.mechanism_target_id) {
     primaryMechanismId = ragMatches[0].matchedRecord.mechanism_target_id;
@@ -783,6 +1199,29 @@ export function verifyPrescription(
     verdictQualifier = `${verdictQualifier} Sources cited: ${citedTitles}.`;
   }
 
+  let checksRan = 1; // Regimen screen always runs within its loaded rules
+  let checksNotRun = 0;
+  for (const d of dosageAudits) {
+    if (d.status === 'Unlisted Ingredient') checksNotRun += 1;
+    else checksRan += 1;
+  }
+  for (const dis of diseaseAudits) {
+    if (
+      dis.status === 'Condition Not Specified' ||
+      dis.criterionNote.includes('not listed in curated catalog')
+    ) {
+      checksNotRun += 1;
+    } else {
+      checksRan += 1;
+    }
+  }
+  checksRan += packChecks.length;
+  if (quizProfile?.completed) {
+    checksRan += items.length;
+  } else {
+    checksNotRun += 1;
+  }
+
   return {
     overallVerdict,
     verdictHeadline,
@@ -790,20 +1229,26 @@ export function verifyPrescription(
     asOfDate: DATASET_AS_OF_DATE,
     patientCondition: patientCondition || 'Unspecified',
     patientAge,
-    patientWeightKg,
+    patientWeightKg: effectiveWeight,
     packChecks,
     dosageAudits,
     diseaseAudits,
     regimenFindings,
     ragMatches,
+    quizProfile,
+    quizRiskFindings,
     primaryMechanismId,
     validationSources,
+    checksRan,
+    checksNotRun,
+    limitedCoverage: true,
     summaryStats: {
       packAlerts,
       dosageIssues,
       diseaseMismatches,
       regimenFlags: regimenFindings.length,
       ragFlags,
+      quizRiskFlags,
     },
   };
 }
@@ -871,6 +1316,11 @@ export function buildDeterministicExplanation(
           : `கவனம்: அளவு, நோய் பொருத்தம் அல்லது மருந்து இடைவினையில் சில சந்தேகங்கள் உள்ளன. மருத்துவரிடம் சரிபார்க்கவும்.`;
 
     const issuesTa: string[] = [];
+    (report.quizRiskFindings ?? []).forEach((q) =>
+      issuesTa.push(
+        `நோயாளி உடல்நல வினாடி-வினா உயிராபத்து எச்சரிக்கை (${q.severity}): ${q.drugsInvolved.join(', ')} — ${q.matchedQuizFactor}.`
+      )
+    );
     report.packChecks
       .filter((p) => p.tier !== 'Not found')
       .forEach((p) =>
@@ -897,7 +1347,7 @@ export function buildDeterministicExplanation(
     const summaryExplanation =
       issuesTa.length > 0
         ? `${verdictText} கண்டறியப்பட்டவை: ${issuesTa.join(' ')}`
-        : `${verdictText} அனைத்து மருந்துகளும் உங்கள் "${report.patientCondition}" நிலைக்கு ஏற்ப சரியான அளவில் உள்ளன.`;
+        : `${verdictText} அனைத்து மருந்துகளும் உங்கள் "${report.patientCondition}" நிலைக்கும் உடல்நல வினாடி-வினா தகவல்களுக்கும் ஏற்ப சரியான அளவில் உள்ளன.`;
 
     const cellularAlphaFoldNote = `செல் உள் அமைப்பு & AlphaFold (${mech.structureId}): ${mech.name} நொதி செல்லின் "${mech.cellularOrganelle}" பகுதியில் செயல்படுகிறது. ${mech.explanationSummary}`;
 
@@ -907,7 +1357,9 @@ export function buildDeterministicExplanation(
       summaryExplanation,
       cellularAlphaFoldNote,
       doctorQuestions: [
-        'இந்த மருந்துகளின் தினசரி அளவு எனது வயதுக்கும் நோய்க்கும் சரியானதா?',
+        (report.quizRiskFindings?.length ?? 0) > 0
+          ? `எனது உடல்நல வினாடி-வினாவில் பதிவான ${report.quizRiskFindings![0].matchedQuizFactor} காரணமாக ${report.quizRiskFindings![0].drugsInvolved.join(', ')} மருந்துக்குப் பதிலாக பாதுகாப்பான மாற்று மருந்து உள்ளதா?`
+          : 'இந்த மருந்துகளின் தினசரி அளவு எனது வயதுக்கும் நோய்க்கும் சரியானதா?',
         report.regimenFindings.length > 0
           ? `${report.regimenFindings[0].drugsInvolved.join(' மற்றும் ')} ஒன்றாக எடுப்பதற்குப் பதிலாக பாதுகாப்பான மாற்று மருந்து உள்ளதா?`
           : 'மருந்துகளை உணவுக்கு முன் அல்லது பின் எப்போது எடுப்பது சிறந்தது?',
@@ -926,10 +1378,14 @@ export function buildDeterministicExplanation(
       )
       .join('\n');
 
+    const quizHi = (report.quizRiskFindings ?? [])
+      .map((q) => `${q.drugsInvolved.join(', ')}: ${q.matchedQuizFactor} के कारण गंभीर जोखिम`)
+      .join('; ');
+
     const summaryExplanation =
       report.overallVerdict === 'SAFE_TO_TAKE'
-        ? `जाँच परिणाम (${report.asOfDate}): जाँची गई खुराक, बीमारी के मिलान और नियामक अलर्ट के अनुसार यह सुरक्षित सीमा में है।`
-        : `सावधानी / समीक्षा आवश्यक: ${report.verdictHeadline}। डॉक्टर या फ़ार्मासिस्ट से सलाह के बिना दवा न रोकें।`;
+        ? `जाँच परिणाम (${report.asOfDate}): जाँची गई खुराक, बीमारी के मिलान और आपकी स्वास्थ्य प्रश्नावली के अनुसार यह सुरक्षित सीमा में है।`
+        : `सावधानी / समीक्षा आवश्यक: ${report.verdictHeadline}।${quizHi ? ` स्वास्थ्य प्रश्नावली चेतावनी: ${quizHi}।` : ''} डॉक्टर या फ़ार्मासिस्ट से सलाह के बिना दवा न लें।`;
 
     const cellularAlphaFoldNote = `कोशिका की आंतरिक संरचना और AlphaFold (${mech.structureId}): ${mech.name} कोशिका के "${mech.cellularOrganelle}" हिस्से में काम करता है। ${mech.explanationSummary}`;
 
@@ -939,7 +1395,9 @@ export function buildDeterministicExplanation(
       summaryExplanation,
       cellularAlphaFoldNote,
       doctorQuestions: [
-        'क्या इन दवाओं की दैनिक खुराक मेरी उम्र और बीमारी के अनुसार सही है?',
+        (report.quizRiskFindings?.length ?? 0) > 0
+          ? `मेरी स्वास्थ्य प्रश्नावली (${report.quizRiskFindings![0].matchedQuizFactor}) के कारण ${report.quizRiskFindings![0].drugsInvolved.join(', ')} का सुरक्षित विकल्प क्या है?`
+          : 'क्या इन दवाओं की दैनिक खुराक मेरी उम्र और बीमारी के अनुसार सही है?',
         'क्या किसी दवा के बीच टकराव या बैच अलर्ट के कारण सुरक्षित विकल्प उपलब्ध है?',
         'इन दवाओं को भोजन से पहले या बाद में कब लेना चाहिए?',
       ],
@@ -957,6 +1415,11 @@ export function buildDeterministicExplanation(
     .join('\n');
 
   const issuesEn: string[] = [];
+  (report.quizRiskFindings ?? []).forEach((q) =>
+    issuesEn.push(
+      `[QUIZ ${q.severity.toUpperCase()}] ${q.drugsInvolved.join(', ')} matched "${q.matchedQuizFactor}": ${q.clinicalSummary}`
+    )
+  );
   report.packChecks
     .filter((p) => p.tier !== 'Not found')
     .forEach((p) =>
@@ -974,8 +1437,8 @@ export function buildDeterministicExplanation(
 
   const summaryExplanation =
     issuesEn.length > 0
-      ? `${report.verdictHeadline}. Verified findings: ${issuesEn.join(' ')}${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`
-      : `${report.verdictHeadline}. Every prescribed medicine matches "${report.patientCondition}", stays within safe daily dosage limits, and shows no regulator alerts or drug clashes as of ${report.asOfDate}.${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`;
+      ? `${report.verdictHeadline}. Combined Quiz & Scanner findings: ${issuesEn.join(' ')}${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`
+      : `${report.verdictHeadline}. Every prescribed medicine matches "${report.patientCondition}", clears your health quiz profile, stays within safe daily dosage limits, and shows no regulator alerts or drug clashes as of ${report.asOfDate}.${sourceNames ? ` Validated against: ${sourceNames}.` : ''}`;
 
   const cellularAlphaFoldNote = `Inside the Cell & AlphaFold (${mech.structureId}, ${mech.provenance}): ${mech.name} operates inside the ${mech.cellularOrganelle}. ${mech.explanationSummary} ${mech.clinicalImplication} Primary structure links: ${mech.rcsbStructureUrl} and ${mech.alphafoldViewerUrl}.`;
 
@@ -985,7 +1448,9 @@ export function buildDeterministicExplanation(
     summaryExplanation,
     cellularAlphaFoldNote,
     doctorQuestions: [
-      `Are the daily doses appropriate for my age (${report.patientAge}) and kidney/liver health?`,
+      (report.quizRiskFindings?.length ?? 0) > 0
+        ? `Because my health quiz flagged "${report.quizRiskFindings![0].matchedQuizFactor}", can we replace or hold ${report.quizRiskFindings![0].drugsInvolved.join(', ')} safely?`
+        : `Are the daily doses appropriate for my age (${report.patientAge}) and kidney/liver health?`,
       report.regimenFindings.length > 0
         ? `Can we switch to a safer alternative that avoids the ${report.regimenFindings[0].drugsInvolved.join(' + ')} clash?`
         : 'Should I take these medicines before or after meals, and are any follow-up lab checks needed?',

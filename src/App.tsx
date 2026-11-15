@@ -12,8 +12,10 @@ import {
   PrescriptionWorkspace,
   type ScanSnapshot,
 } from './components/PrescriptionWorkspace.tsx';
+import { PatientHealthQuizPage } from './components/PatientHealthQuizPage.tsx';
 import { RemediationPlanPage } from './components/RemediationPlanPage.tsx';
 import { TestCasesPage } from './components/TestCasesPage.tsx';
+import { EMPTY_PATIENT_HEALTH_QUIZ } from './data/healthQuizCatalog.ts';
 import { MECHANISM_TARGETS } from './data/medguardCatalog.ts';
 import {
   auth,
@@ -27,14 +29,46 @@ import {
 import type {
   LanguageCode,
   MechanismTargetId,
+  PatientHealthQuiz,
   RemediationPlan,
   SamplePreset,
   VerificationReport,
 } from './types/medguard.ts';
 
+function getQuizStorageKey(uid?: string | null): string {
+  return `medguard_health_quiz_v1_${uid || 'guest'}`;
+}
+
+function loadStoredQuiz(uid?: string | null): PatientHealthQuiz {
+  if (typeof window === 'undefined') return EMPTY_PATIENT_HEALTH_QUIZ;
+  try {
+    const raw = window.localStorage.getItem(getQuizStorageKey(uid));
+    if (!raw) return EMPTY_PATIENT_HEALTH_QUIZ;
+    const parsed = JSON.parse(raw) as Partial<PatientHealthQuiz>;
+    return {
+      ...EMPTY_PATIENT_HEALTH_QUIZ,
+      ...parsed,
+      allergies: Array.isArray(parsed.allergies) ? parsed.allergies : [],
+      fatalRiskFactors: Array.isArray(parsed.fatalRiskFactors) ? parsed.fatalRiskFactors : [],
+    };
+  } catch {
+    return EMPTY_PATIENT_HEALTH_QUIZ;
+  }
+}
+
+function saveStoredQuiz(uid: string | null | undefined, quiz: PatientHealthQuiz) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(getQuizStorageKey(uid), JSON.stringify(quiz));
+  } catch {
+    // ignore storage quota failures
+  }
+}
+
 function buildSpeechScript(report: VerificationReport, language: LanguageCode): string {
   const mech = MECHANISM_TARGETS[report.primaryMechanismId];
   const dosageAlerts = report.dosageAudits.filter((d) => d.status !== 'Appropriate');
+  const quizAlerts = report.quizRiskFindings ?? [];
 
   if (language === 'ta') {
     const statusText =
@@ -43,6 +77,16 @@ function buildSpeechScript(report: VerificationReport, language: LanguageCode): 
         : report.overallVerdict === 'CAUTION_REVIEW'
           ? 'மருந்து அளவு மற்றும் பாதுகாப்பு நிலை: எச்சரிக்கை, மருத்துவரிடம் அல்லது மருந்தாளரிடம் சரிபார்க்கவும்.'
           : 'மருந்து அளவு மற்றும் பாதுகாப்பு நிலை: உடனடி மருத்துவ கவனம் தேவை.';
+
+    const quizSummaryTa =
+      quizAlerts.length > 0
+        ? quizAlerts
+            .map(
+              (q) =>
+                `உடல்நல வினாடி-வினா எச்சரிக்கை: ${q.drugsInvolved.join(', ')} — ${q.matchedQuizFactor}.`
+            )
+            .join(' ')
+        : '';
 
     const dosageSummaryTa =
       dosageAlerts.length > 0
@@ -55,7 +99,7 @@ function buildSpeechScript(report: VerificationReport, language: LanguageCode): 
         : 'அனைத்து மருந்துகளின் தினசரி அளவும் பாதுகாப்பான வரம்பிற்குள் உள்ளது.';
 
     const mechTa = `AlphaFold மற்றும் செல் உள் அமைப்பு விளக்கம்: ${mech.name} நொதி செல்லின் ${mech.cellularOrganelle} பகுதியில் செயல்படுகிறது. ${mech.explanationSummary}`;
-    return `${statusText} ${dosageSummaryTa} ${mechTa}`;
+    return `${statusText} ${quizSummaryTa} ${dosageSummaryTa} ${mechTa}`;
   }
 
   if (language === 'hi') {
@@ -63,8 +107,14 @@ function buildSpeechScript(report: VerificationReport, language: LanguageCode): 
       report.overallVerdict === 'SAFE_TO_TAKE'
         ? `खुराक और सुरक्षा स्थिति: सुरक्षित (${report.asOfDate} तक)।`
         : 'खुराक और सुरक्षा स्थिति: सावधानी, कृपया डॉक्टर या फ़ार्मासिस्ट से जाँच कराएँ।';
+    const quizSummaryHi =
+      quizAlerts.length > 0
+        ? quizAlerts
+            .map((q) => `स्वास्थ्य प्रश्नावली जोखिम: ${q.drugsInvolved.join(', ')} (${q.matchedQuizFactor})।`)
+            .join(' ')
+        : '';
     const mechHi = `AlphaFold और कोशिका तंत्र विवरण: ${mech.name} कोशिका के ${mech.cellularOrganelle} में कार्य करता है। ${mech.explanationSummary}`;
-    return `${statusTextHi} ${mechHi}`;
+    return `${statusTextHi} ${quizSummaryHi} ${mechHi}`;
   }
 
   const statusTextEn =
@@ -73,6 +123,16 @@ function buildSpeechScript(report: VerificationReport, language: LanguageCode): 
       : report.overallVerdict === 'CAUTION_REVIEW'
         ? 'Dosage safety status: Caution. Review recommended with your doctor or pharmacist.'
         : 'Dosage safety status: Action required. Safety or dosage limit issue detected.';
+
+  const quizSummaryEn =
+    quizAlerts.length > 0
+      ? quizAlerts
+          .map(
+            (q) =>
+              `Patient Health Quiz ${q.severity} alert for ${q.drugsInvolved.join(', ')}: matched ${q.matchedQuizFactor}.`
+          )
+          .join(' ')
+      : '';
 
   const dosageSummaryEn =
     dosageAlerts.length > 0
@@ -85,13 +145,18 @@ function buildSpeechScript(report: VerificationReport, language: LanguageCode): 
       : 'All prescribed daily dosages are within standard regulatory limits.';
 
   const mechEn = `Cellular and AlphaFold mechanism explanation for ${mech.name} in the ${mech.cellularOrganelle}: ${mech.explanationSummary} ${mech.clinicalImplication}`;
-  return `${statusTextEn} ${dosageSummaryEn} ${mechEn}`;
+  return `${statusTextEn} ${quizSummaryEn} ${dosageSummaryEn} ${mechEn}`;
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [guestAccess, setGuestAccess] = useState(false);
+
+  const [quizProfile, setQuizProfile] = useState<PatientHealthQuiz>(() =>
+    loadStoredQuiz(null)
+  );
+  const [quizGateResolved, setQuizGateResolved] = useState(false);
 
   const [activePage, setActivePage] = useState<AppPage>('home');
   const [language, setLanguage] = useState<LanguageCode>('en');
@@ -129,6 +194,7 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setAuthReady(true);
+      setQuizProfile(loadStoredQuiz(currentUser?.uid));
       if (currentUser) {
         setGuestAccess(false);
         void ensureUserProfile(
@@ -269,6 +335,29 @@ export default function App() {
     setActivePage('scan');
   };
 
+  const handleCompleteQuiz = useCallback(
+    (nextQuiz: PatientHealthQuiz, target: 'home' | 'scan') => {
+      setQuizProfile(nextQuiz);
+      saveStoredQuiz(user?.uid, nextQuiz);
+      setCachedRemediationPlan(null);
+      setQuizGateResolved(true);
+      setActivePage(target);
+    },
+    [user?.uid]
+  );
+
+  const handleSkipQuizToHome = useCallback(() => {
+    setQuizProfile((prev) => {
+      const next: PatientHealthQuiz = prev.completed
+        ? prev
+        : { ...prev, decision: 'skipped' };
+      saveStoredQuiz(user?.uid, next);
+      return next;
+    });
+    setQuizGateResolved(true);
+    setActivePage('home');
+  }, [user?.uid]);
+
   if (!authReady) {
     return (
       <div className="min-h-screen cellular-canvas text-[#1E221D] flex items-center justify-center p-6">
@@ -284,13 +373,34 @@ export default function App() {
       <LoginPage
         language={language}
         onLanguageChange={handleLanguageChange}
-        onContinueGuest={() => setGuestAccess(true)}
+        onContinueGuest={() => {
+          setQuizGateResolved(false);
+          setGuestAccess(true);
+        }}
+      />
+    );
+  }
+
+  if (!quizGateResolved) {
+    return (
+      <PatientHealthQuizPage
+        mode="gate"
+        language={language}
+        quizProfile={quizProfile}
+        onLanguageChange={handleLanguageChange}
+        onCompleteQuiz={handleCompleteQuiz}
+        onSkipToHome={handleSkipQuizToHome}
+        onKeepSavedToHome={() => {
+          setQuizGateResolved(true);
+          setActivePage('home');
+        }}
       />
     );
   }
 
   const navItems: Array<[AppPage, string]> = [
     ['home', 'Home'],
+    ['quiz', 'Safety Quiz'],
     ['scan', 'Scan Here'],
     ['test-cases', 'Test Cases'],
     ['cell', 'Cell 3D'],
@@ -299,6 +409,7 @@ export default function App() {
 
   const pageLabels: Record<AppPage, string> = {
     home: 'Home',
+    quiz: 'Health & Safety Quiz',
     scan: 'Scan Here',
     remediation: 'To-Do Next Plan',
     'test-cases': 'Test Cases',
@@ -344,6 +455,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setGuestAccess(false);
+                  setQuizGateResolved(false);
                   void signOutAccount();
                 }}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-[#C6B69E] bg-[#FCF9F4] hover:bg-[#EFE7DA] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
@@ -354,7 +466,10 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                onClick={() => setGuestAccess(false)}
+                onClick={() => {
+                  setQuizGateResolved(false);
+                  setGuestAccess(false);
+                }}
                 className="px-4 py-2 rounded-lg bg-[#556B22] hover:bg-[#46591B] text-[#FCF9F4] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
               >
                 Sign In
@@ -368,6 +483,7 @@ export default function App() {
           {(
             [
               ['home', 'Home'],
+              ['quiz', 'Safety Quiz'],
               ['scan', 'Scan Here'],
               ['remediation', 'To-Do Plan'],
               ['test-cases', 'Test Cases'],
@@ -472,6 +588,7 @@ export default function App() {
             <HomePage
               language={language}
               userId={user?.uid ?? null}
+              quizProfile={quizProfile}
               savedChecks={savedChecks}
               checksLoading={checksLoading}
               onSelectPage={setActivePage}
@@ -512,10 +629,22 @@ export default function App() {
           </div>
         )}
 
+        {activePage === 'quiz' && (
+          <PatientHealthQuizPage
+            mode="page"
+            language={language}
+            quizProfile={quizProfile}
+            onLanguageChange={handleLanguageChange}
+            onCompleteQuiz={handleCompleteQuiz}
+            onSkipToHome={handleSkipQuizToHome}
+          />
+        )}
+
         {activePage === 'scan' && (
           <PrescriptionWorkspace
             language={language}
             userId={user?.uid ?? null}
+            quizProfile={quizProfile}
             selectedPreset={selectedPreset}
             restoredSnapshot={selectedPreset ? null : scanSnapshot}
             onLanguageChange={handleLanguageChange}
@@ -527,6 +656,7 @@ export default function App() {
             onOpenCellView={() => setActivePage('cell')}
             onOpenRemediationPlan={() => setActivePage('remediation')}
             onOpenTestCases={() => setActivePage('test-cases')}
+            onOpenQuiz={() => setActivePage('quiz')}
           />
         )}
 
@@ -577,12 +707,15 @@ export default function App() {
       <footer className="border-t border-[#D5C8B4] py-4 px-5 text-xs text-[#555A50]">
         <div className="max-w-[1280px] mx-auto flex flex-wrap items-center justify-between gap-2">
           <span>
-            MedGuard · Prescription safety verification & 3D cellular mechanism explorer
+            MedGuard · Prescription safety verification &amp; 3D cellular mechanism explorer
           </span>
           {!user && (
             <button
               type="button"
-              onClick={() => setGuestAccess(false)}
+              onClick={() => {
+                setQuizGateResolved(false);
+                setGuestAccess(false);
+              }}
               className="text-[#556B22] font-semibold hover:underline"
             >
               Sign in to save checks
@@ -599,6 +732,7 @@ export default function App() {
         language={language}
         onLanguageChange={handleLanguageChange}
         activePage={activePage}
+        quizProfile={quizProfile}
         savedChecks={savedChecks}
         latestReport={lastReport}
         onNavigate={(page) => setActivePage(page)}

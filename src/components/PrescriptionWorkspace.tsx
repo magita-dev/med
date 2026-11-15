@@ -16,14 +16,22 @@ import {
   Trash2,
   Upload,
   Volume2,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { DOSE_RULES, SAMPLE_PRESETS } from '../data/medguardCatalog.ts';
+import {
+  hasActiveQuizRisks,
+  summarizeQuizProfile,
+} from '../data/healthQuizCatalog.ts';
 import { saveVerificationCheck } from '../firebase.ts';
+import { EvidencePassport } from './EvidencePassport.tsx';
 import type {
   ConditionAgeDosageEvaluation,
   LanguageCode,
   MechanismTargetId,
   MultilingualExplanation,
+  PatientHealthQuiz,
   PrescriptionItem,
   SamplePreset,
   VerificationReport,
@@ -290,6 +298,7 @@ export interface ScanSnapshot {
 interface PrescriptionWorkspaceProps {
   language: LanguageCode;
   userId?: string | null;
+  quizProfile?: PatientHealthQuiz;
   selectedPreset?: {
     preset: SamplePreset;
     autoVerify: boolean;
@@ -303,6 +312,7 @@ interface PrescriptionWorkspaceProps {
   onOpenCellView: () => void;
   onOpenRemediationPlan?: () => void;
   onOpenTestCases?: () => void;
+  onOpenQuiz?: () => void;
 }
 
 const UI_TEXT: Record<
@@ -377,6 +387,7 @@ const UI_TEXT: Record<
 export function PrescriptionWorkspace({
   language,
   userId,
+  quizProfile,
   selectedPreset,
   restoredSnapshot,
   onLanguageChange,
@@ -386,6 +397,7 @@ export function PrescriptionWorkspace({
   onOpenCellView,
   onOpenRemediationPlan,
   onOpenTestCases,
+  onOpenQuiz,
 }: PrescriptionWorkspaceProps) {
   const t = UI_TEXT[language];
   const initial = selectedPreset?.preset ?? SAMPLE_PRESETS[0];
@@ -397,10 +409,16 @@ export function PrescriptionWorkspace({
     restoredSnapshot?.patientCondition ?? initial.patientCondition
   );
   const [patientAge, setPatientAge] = useState(
-    restoredSnapshot?.patientAge ?? String(initial.patientAge)
+    restoredSnapshot?.patientAge ??
+      (quizProfile?.patientAge !== undefined
+        ? String(quizProfile.patientAge)
+        : String(initial.patientAge))
   );
   const [patientWeightKg, setPatientWeightKg] = useState(
-    restoredSnapshot?.patientWeightKg ?? ''
+    restoredSnapshot?.patientWeightKg ??
+      (quizProfile?.patientWeightKg !== undefined
+        ? String(quizProfile.patientWeightKg)
+        : '')
   );
   const [items, setItems] = useState<PrescriptionItem[]>(
     restoredSnapshot?.items ?? initial.items
@@ -408,6 +426,10 @@ export function PrescriptionWorkspace({
   const [confirmed, setConfirmed] = useState(true);
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const [uploadedDocName, setUploadedDocName] = useState<string>('');
+  const [zoomPreview, setZoomPreview] = useState(false);
+  const [ocrLines, setOcrLines] = useState<Array<{ text: string; confidence: number }>>([]);
+  const [selectedOcrLine, setSelectedOcrLine] = useState<number | null>(null);
+  const [unparsedLines, setUnparsedLines] = useState<string[]>([]);
 
   const [report, setReport] = useState<VerificationReport | null>(
     restoredSnapshot?.report ?? null
@@ -486,6 +508,10 @@ export function PrescriptionWorkspace({
     stopAudio();
     setPreviewUrl('');
     setUploadedDocName('');
+    setZoomPreview(false);
+    setOcrLines([]);
+    setSelectedOcrLine(null);
+    setUnparsedLines([]);
     setRawText(preset.rawPrescriptionText);
     setPatientCondition(preset.patientCondition);
     setPatientAge(String(preset.patientAge));
@@ -522,6 +548,26 @@ export function PrescriptionWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPreset?.nonce]);
 
+  const currentQuizSig = useMemo(
+    () => (quizProfile ? JSON.stringify(quizProfile) : ''),
+    [quizProfile]
+  );
+
+  useEffect(() => {
+    if (!quizProfile || !report || busy || items.length === 0) return;
+    const reportQuizSig = report.quizProfile ? JSON.stringify(report.quizProfile) : '';
+    if (currentQuizSig && currentQuizSig !== reportQuizSig) {
+      setBusy(true);
+      const weightNum = Number(patientWeightKg) > 0 ? Number(patientWeightKg) : undefined;
+      void runVerification(items, patientCondition, effectiveAgeNum, language, weightNum)
+        .catch((e) => {
+          setError(e instanceof Error ? e.message : 'Re-verification failed');
+        })
+        .finally(() => setBusy(false));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentQuizSig]);
+
   const runVerification = async (
     targetItems: PrescriptionItem[],
     conditionVal: string,
@@ -541,6 +587,7 @@ export function PrescriptionWorkspace({
       patientCondition: conditionVal,
       patientAge: ageVal,
       patientWeightKg: weightVal && weightVal > 0 ? weightVal : undefined,
+      quizProfile,
     };
 
     const [verifyRes, ragEvalRes] = await Promise.all([
@@ -636,6 +683,10 @@ export function PrescriptionWorkspace({
     setRawText('');
     setItems([]);
     setPreviewUrl('');
+    setZoomPreview(false);
+    setOcrLines([]);
+    setSelectedOcrLine(null);
+    setUnparsedLines([]);
     setUploadedDocName(file.name);
 
     try {
@@ -647,6 +698,8 @@ export function PrescriptionWorkspace({
 
       let data: {
         items?: PrescriptionItem[];
+        unparsedLines?: string[];
+        ocrLines?: Array<{ text: string; confidence: number }>;
         extractedRawText?: string;
         detectedCondition?: string;
         detectedAge?: number;
@@ -708,6 +761,8 @@ export function PrescriptionWorkspace({
 
       const extractedItems: PrescriptionItem[] = data.items ?? [];
       setItems(extractedItems);
+      setUnparsedLines(data.unparsedLines ?? []);
+      setOcrLines(data.ocrLines ?? []);
       setRawText(data.extractedRawText || '');
 
       const effectiveCondition = data.detectedCondition?.trim() || patientCondition.trim() || '';
@@ -774,6 +829,7 @@ export function PrescriptionWorkspace({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Parsing failed');
       setItems(data.items ?? []);
+      setUnparsedLines(data.unparsedLines ?? []);
       if (data.detectedCondition?.trim()) {
         setPatientCondition(data.detectedCondition.trim());
       }
@@ -978,6 +1034,49 @@ export function PrescriptionWorkspace({
         </div>
       </div>
 
+      {/* Combined Patient Health & Fatal-Risk Quiz Context Strip */}
+      {quizProfile && (
+        <div
+          className={`rounded-xl p-4 border flex flex-wrap items-center justify-between gap-3 ${
+            hasActiveQuizRisks(quizProfile)
+              ? 'bg-[#FCEBEF] border-[#E2A9B3]'
+              : quizProfile.completed
+                ? 'bg-[#EAF5E9] border-[#B4D9B1]'
+                : 'bg-[#FDF5E3] border-[#E4C98C]'
+          }`}
+        >
+          <div className="flex items-start gap-3 max-w-3xl">
+            {hasActiveQuizRisks(quizProfile) ? (
+              <ShieldAlert className="w-5 h-5 text-[#8B152A] shrink-0 mt-0.5" />
+            ) : quizProfile.completed ? (
+              <ShieldCheck className="w-5 h-5 text-[#245920] shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-5 h-5 text-[#875E0D] shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-0.5 text-xs">
+              <div className="font-mono font-semibold text-[#1E221D]">
+                {quizProfile.completed
+                  ? 'ACTIVE PATIENT SAFETY QUIZ PROFILE · COMBINED WITH SCANNER VERIFICATION'
+                  : 'HEALTH & FATAL-RISK QUIZ NOT COMPLETED — RECOMMENDED FOR FINAL RESULT'}
+              </div>
+              <p className="text-[#2B3028] leading-relaxed">
+                {summarizeQuizProfile(quizProfile, language)}
+              </p>
+            </div>
+          </div>
+
+          {onOpenQuiz && (
+            <button
+              type="button"
+              onClick={onOpenQuiz}
+              className="px-3.5 py-2 rounded-lg border border-[#C6B69E] bg-[#FCF9F4] hover:bg-[#EFE7DA] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              {quizProfile.completed ? 'Edit Health Quiz' : 'Take Safety Quiz Now'}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Upload + Patient Context Split */}
       <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)] gap-5 items-stretch">
         {/* Left: Photo Upload & Raw Text */}
@@ -1012,13 +1111,70 @@ export function PrescriptionWorkspace({
             </div>
 
             {previewUrl ? (
-              <div className="rounded-lg overflow-hidden border border-[#D5C8B4] bg-[#EFE7DA] max-h-48 flex items-center justify-center">
-                <img
-                  src={previewUrl}
-                  alt="Uploaded prescription preview"
-                  referrerPolicy="no-referrer"
-                  className="max-h-48 object-contain"
-                />
+              <div className="rounded-lg border border-[#D5C8B4] bg-[#EFE7DA] overflow-hidden space-y-2 p-2.5">
+                <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-[#4F544C]">
+                  <span>SCAN PREVIEW · {uploadedDocName || 'Uploaded image'}</span>
+                  <button
+                    type="button"
+                    onClick={() => setZoomPreview((z) => !z)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FCF9F4] border border-[#C6B69E] text-[#1E221D] hover:bg-[#E5DAC7]"
+                  >
+                    {zoomPreview ? (
+                      <>
+                        <ZoomOut className="w-3 h-3" /> Fit Image
+                      </>
+                    ) : (
+                      <>
+                        <ZoomIn className="w-3 h-3" /> Zoom 200% (Batch Inspect)
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div
+                  className={`rounded border border-[#D5C8B4] bg-[#FCF9F4] ${
+                    zoomPreview
+                      ? 'max-h-64 overflow-auto'
+                      : 'max-h-48 flex items-center justify-center overflow-hidden'
+                  }`}
+                >
+                  <img
+                    src={previewUrl}
+                    alt="Uploaded prescription preview"
+                    referrerPolicy="no-referrer"
+                    onClick={() => setZoomPreview((z) => !z)}
+                    className={
+                      zoomPreview
+                        ? 'w-[200%] max-w-none cursor-zoom-out'
+                        : 'max-h-48 object-contain cursor-zoom-in'
+                    }
+                  />
+                </div>
+                {ocrLines.length > 0 && (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-mono font-semibold text-[#3C4138]">
+                      Unconfirmed OCR Lines (verify before submitting)
+                    </div>
+                    <div className="max-h-28 overflow-y-auto space-y-1">
+                      {ocrLines.map((ln, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setSelectedOcrLine(idx)}
+                          className={`w-full text-left px-2.5 py-1 rounded border text-[11px] font-mono flex items-center justify-between gap-2 ${
+                            selectedOcrLine === idx
+                              ? 'bg-[#EAF0DC] border-[#637928] text-[#1E221D] font-semibold'
+                              : 'bg-[#FCF9F4] border-[#D5C8B4] text-[#3C4138] hover:border-[#B8A68B]'
+                          }`}
+                        >
+                          <span className="truncate">{ln.text}</span>
+                          <span className="shrink-0 text-[#555A50]">
+                            {Math.round(ln.confidence * 100)}%
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               uploadedDocName && (
@@ -1156,6 +1312,28 @@ export function PrescriptionWorkspace({
                           placeholder="active ingredient(s)"
                           className="w-full bg-[#F5EFE5] border border-[#D5C8B4] rounded px-2 py-0.5 text-[#29659B] font-mono text-[11px] focus:outline-none focus:border-[#29659B]"
                         />
+                        {(item.slots?.length || item.modifiers?.length || item.asNeeded) && (
+                          <div className="flex flex-wrap gap-1 pt-0.5 font-mono text-[10px]">
+                            {item.slots && item.slots.length > 0 && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#EAF0DC] border border-[#B4D9B1] text-[#245920]">
+                                {item.slots.join('-')}
+                              </span>
+                            )}
+                            {item.modifiers?.map((m) => (
+                              <span
+                                key={m}
+                                className="px-1.5 py-0.5 rounded bg-[#E9F1F9] border border-[#B3CDE5] text-[#1A4B7A] uppercase"
+                              >
+                                {m}
+                              </span>
+                            ))}
+                            {item.asNeeded && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#FDF5E3] border border-[#E4C98C] text-[#875E0D]">
+                                SOS / PRN
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="px-2.5 py-2">
                         <input
@@ -1216,6 +1394,24 @@ export function PrescriptionWorkspace({
           </div>
 
           <div className="space-y-3 pt-2 border-t border-[#E4D9C7]">
+            {unparsedLines.length > 0 && (
+              <div
+                role="status"
+                className="rounded-lg px-3.5 py-2.5 border border-[#E4C98C] bg-[#FDF5E3] text-xs text-[#6B4A08] space-y-1"
+              >
+                <div className="font-mono font-semibold flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-[#B8841E] shrink-0" />
+                  <span>
+                    {unparsedLines.length} line{unparsedLines.length > 1 ? 's' : ''} did not parse cleanly — confirm manually:
+                  </span>
+                </div>
+                <ul className="list-disc list-inside font-mono text-[11px] space-y-0.5 text-[#4F3B0F]">
+                  {unparsedLines.map((ul, i) => (
+                    <li key={i}>{ul}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <DosageWarning exceedances={dosageExceedances} language={language} />
 
             {items.length > 0 && (
@@ -1313,6 +1509,11 @@ export function PrescriptionWorkspace({
                 </div>
                 <h3 className="font-display text-xl font-bold text-[#1E221D]">{report.verdictHeadline}</h3>
                 <p className="text-sm text-[#2B3028] leading-relaxed">{report.verdictQualifier}</p>
+                {report.checksRan !== undefined && (
+                  <p className="text-xs font-mono text-[#4F544C] pt-0.5">
+                    Coverage: {report.checksRan} checks ran · {report.checksNotRun ?? 0} checks could not run due to missing rule or unspecified field (0 flags does not guarantee completeness).
+                  </p>
+                )}
               </div>
             </div>
 
@@ -1359,6 +1560,93 @@ export function PrescriptionWorkspace({
               </button>
             </div>
           </div>
+
+          {/* Combined Patient Quiz Fatal-Risk, Allergy & Surgery Verification Section */}
+          {(report.quizProfile?.completed || (report.quizRiskFindings?.length ?? 0) > 0) && (
+            <section
+              aria-label="Combined Patient Health Quiz Safety Audit"
+              className={`rounded-xl p-5 border space-y-3 ${
+                (report.quizRiskFindings?.length ?? 0) > 0
+                  ? 'bg-[#FCEBEF] border-[#E2A9B3]'
+                  : 'bg-[#EAF5E9] border-[#B4D9B1]'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span
+                    className={`text-[11px] font-mono font-semibold ${
+                      (report.quizRiskFindings?.length ?? 0) > 0
+                        ? 'text-[#8B152A]'
+                        : 'text-[#245920]'
+                    }`}
+                  >
+                    PATIENT HEALTH QUIZ + SCANNER COMBINED CHECK
+                  </span>
+                  <h4 className="font-display text-lg font-bold text-[#1E221D]">
+                    {(report.quizRiskFindings?.length ?? 0) > 0
+                      ? `Fatal / Critical Patient Profile Conflicts (${report.quizRiskFindings!.length})`
+                      : 'Patient Health Quiz Cleared — Zero Personal Risk Conflicts'}
+                  </h4>
+                </div>
+                {onOpenQuiz && (
+                  <button
+                    type="button"
+                    onClick={onOpenQuiz}
+                    className="px-3 py-1.5 rounded-lg border border-[#C6B69E] bg-[#FCF9F4] hover:bg-[#EFE7DA] text-[#1E221D] text-xs font-semibold transition-colors whitespace-nowrap"
+                  >
+                    Update Quiz Profile
+                  </button>
+                )}
+              </div>
+
+              {(report.quizRiskFindings?.length ?? 0) === 0 ? (
+                <p className="text-xs text-[#245920] leading-relaxed">
+                  Verified against your saved Health Safety Quiz ({summarizeQuizProfile(report.quizProfile!, language)}). No drug allergies, recent surgery hemorrhage risks, or organ-failure contraindications matched this prescription.
+                </p>
+              ) : (
+                <div className="grid lg:grid-cols-2 gap-3">
+                  {report.quizRiskFindings!.map((qf) => (
+                    <div
+                      key={qf.id}
+                      className="rounded-xl p-4 bg-[#FCF9F4] border border-[#E2A9B3] space-y-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-[11px] font-bold text-[#8B152A]">
+                          {qf.severity.toUpperCase()} · {qf.category.toUpperCase()}
+                        </span>
+                        <span className="font-mono text-[11px] text-[#555A50]">
+                          {qf.drugsInvolved.join(', ')}
+                        </span>
+                      </div>
+                      <div className="text-sm font-bold text-[#1E221D]">{qf.title}</div>
+                      <div className="text-[11px] font-mono text-[#875E0D]">
+                        Matched Quiz Answer: {qf.matchedQuizFactor}
+                      </div>
+                      <p className="text-[#2B3028] leading-relaxed">{qf.clinicalSummary}</p>
+                      <div className="rounded-lg bg-[#FCEBEF] border border-[#E6B8C1] px-3 py-2 text-[#8B152A] font-medium">
+                        Action: {qf.recommendedAction}
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <span className="text-[11px] font-mono text-[#555A50]">
+                          Source: {qf.source}
+                        </span>
+                        {qf.mechanismTargetId && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenMechanism(qf.mechanismTargetId!)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#E9F1F9] border border-[#B3CDE5] text-[#1A4B7A] hover:bg-[#DCEAF7] font-semibold"
+                          >
+                            <Microscope className="w-3.5 h-3.5" />
+                            {t.whyBtn} ({qf.mechanismTargetId})
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           {/* Validated Sources Grounding Final Safe / Unsafe Verdict */}
           {report.validationSources && report.validationSources.length > 0 && (
@@ -1754,33 +2042,7 @@ export function PrescriptionWorkspace({
 
               <div className="space-y-3">
                 {report.packChecks.map((p) => (
-                  <div
-                    key={p.itemId}
-                    className="organelle-subpanel rounded-lg p-3.5 space-y-1.5 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-[#1E221D]">{p.productName}</span>
-                      <span
-                        className={`font-mono font-semibold ${
-                          p.tier === 'Confirmed'
-                            ? 'text-[#8B152A]'
-                            : p.tier === 'Same product, different batch'
-                              ? 'text-[#875E0D]'
-                              : 'text-[#3C4138]'
-                        }`}
-                      >
-                        {p.tier === 'Not found'
-                          ? `Not found in alerts as of ${p.asOfDate}`
-                          : `${p.tier} (${p.agency} ${p.alertId})`}
-                      </span>
-                    </div>
-                    <div className="text-[11px] font-mono text-[#555A50]">
-                      Evidence: {p.evidenceTier} · Batch: {p.batchNumber} · Product match:{' '}
-                      {p.criteria.productMatch ? 'Yes' : 'No'} · Batch match:{' '}
-                      {p.criteria.batchMatch ? 'Yes' : 'No'}
-                    </div>
-                    {p.reason && <p className="text-[#8B152A] font-medium">{p.reason}</p>}
-                  </div>
+                  <EvidencePassport key={p.itemId} packCheck={p} language={language} />
                 ))}
 
                 {report.regimenFindings.length === 0 ? (

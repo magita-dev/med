@@ -387,9 +387,9 @@ export function RemediationPlanPage({
           </div>
         </div>
 
-        {/* Dosage Match & Disease Match Audit Summary Strip */}
+        {/* Dosage Match, Disease Match & Health Quiz Audit Summary Strip */}
         {plan && (
-          <div className="grid md:grid-cols-2 gap-3 pt-3 border-t border-[#E4D9C7]">
+          <div className="grid md:grid-cols-3 gap-3 pt-3 border-t border-[#E4D9C7]">
             <div className="organelle-subpanel rounded-lg p-3.5 flex items-start gap-2.5 text-xs">
               {report.overallVerdict === 'SAFE_TO_TAKE' ? (
                 <ShieldCheck className="w-4 h-4 text-[#245920] shrink-0 mt-0.5" />
@@ -418,6 +418,23 @@ export function RemediationPlanPage({
                 </div>
                 <p className="text-[#1E221D] mt-0.5 leading-snug">
                   {plan.diseaseMatchStatusSummary}
+                </p>
+              </div>
+            </div>
+
+            <div className="organelle-subpanel rounded-lg p-3.5 flex items-start gap-2.5 text-xs">
+              {(report.quizRiskFindings?.length ?? 0) > 0 ? (
+                <ShieldAlert className="w-4 h-4 text-[#8B152A] shrink-0 mt-0.5" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 text-[#245920] shrink-0 mt-0.5" />
+              )}
+              <div>
+                <div className="font-mono text-[11px] font-semibold text-[#555A50]">
+                  HEALTH QUIZ FATAL-RISK CHECK
+                </div>
+                <p className="text-[#1E221D] mt-0.5 leading-snug">
+                  {plan.quizRiskStatusSummary ||
+                    'Cross-checked against surgery, allergy, and organ safety profile.'}
                 </p>
               </div>
             </div>
