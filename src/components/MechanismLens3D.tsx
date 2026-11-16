@@ -5,6 +5,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { ExternalLink, Info, RotateCcw, ShieldAlert } from 'lucide-react';
 import { MECHANISM_TARGETS } from '../data/medguardCatalog.ts';
 import type { LanguageCode, MechanismTargetId } from '../types/medguard.ts';
+import { MolStarLiveViewer } from './MolStarLiveViewer.tsx';
 
 interface MechanismLens3DProps {
   targetId: MechanismTargetId;
@@ -26,8 +27,8 @@ export function MechanismLens3D({
   );
   const [ligandMode, setLigandMode] = useState<'clash' | 'substrate'>('clash');
   const [selectedResidueId, setSelectedResidueId] = useState<string>(target.residues[0]?.id ?? 'r1');
+  const [residueFocusCounter, setResidueFocusCounter] = useState(0);
   const [viewerMode, setViewerMode] = useState<'threejs' | 'molstar'>('threejs');
-  const [molstarLoaded, setMolstarLoaded] = useState(false);
 
   const ligandModeRef = useRef(ligandMode);
   const provenanceRef = useRef(provenanceMode);
@@ -36,7 +37,7 @@ export function MechanismLens3D({
   useEffect(() => {
     setProvenanceMode(target.provenance === 'AlphaFold-predicted' ? 'AlphaFold' : 'PDB');
     setSelectedResidueId(target.residues[0]?.id ?? 'r1');
-    setMolstarLoaded(false);
+    setResidueFocusCounter(0);
   }, [target]);
 
   useEffect(() => {
@@ -48,6 +49,7 @@ export function MechanismLens3D({
   }, [provenanceMode]);
 
   useEffect(() => {
+    if (viewerMode !== 'threejs') return;
     const container = mountRef.current;
     if (!container) return;
 
@@ -325,7 +327,7 @@ export function MechanismLens3D({
       disposables.forEach((d) => d.dispose());
       renderer.dispose();
     };
-  }, [target, provenanceMode]);
+  }, [target, provenanceMode, viewerMode]);
 
   const activeResidue =
     target.residues.find((r) => r.id === selectedResidueId) ?? target.residues[0];
@@ -401,109 +403,22 @@ export function MechanismLens3D({
         </span>
       </div>
 
-      <div className="grid lg:grid-cols-[minmax(0,1.45fr)_minmax(310px,1fr)]">
-        {/* 3D Protein Pocket Stage / Click-to-Load Mol* Viewer */}
-        <div className="relative bg-[#EFE7DA] min-h-[380px] lg:min-h-[450px]">
-          <div
-            ref={mountRef}
-            className={`${
-              viewerMode === 'threejs' ? 'block' : 'hidden'
-            } w-full h-[380px] lg:h-[450px] cursor-grab active:cursor-grabbing`}
-          />
+      <div
+        className={
+          viewerMode === 'molstar'
+            ? 'flex flex-col'
+            : 'grid lg:grid-cols-[minmax(0,1.45fr)_minmax(310px,1fr)]'
+        }
+      >
+        {/* 3D Protein Pocket Stage OR Full-Width Live Mol* Viewer */}
+        {viewerMode === 'threejs' ? (
+          <div className="relative bg-[#EFE7DA] min-h-[380px] lg:min-h-[450px]">
+            <div
+              ref={mountRef}
+              className="w-full h-[380px] lg:h-[450px] cursor-grab active:cursor-grabbing"
+            />
 
-          {viewerMode === 'molstar' && (
-            <div className="w-full h-[380px] lg:h-[450px] flex flex-col bg-[#F5EFE5]">
-              {!molstarLoaded ? (
-                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded bg-[#FCF9F4] border border-[#D5C8B4] text-[11px] font-mono text-[#1E221D]">
-                    {provenanceMode === 'PDB'
-                      ? `Experimental PDB ${rcsbId}`
-                      : `AlphaFold DB ${afId} (pLDDT ${target.plddtScore ?? 'high'})`}
-                  </div>
-                  <h4 className="font-display text-lg font-semibold text-[#1E221D]">
-                    Interactive Mol* 3D Viewer ({target.id})
-                  </h4>
-                  <p className="text-xs text-[#4F544C] max-w-md leading-relaxed">
-                    {provenanceMode === 'PDB'
-                      ? 'Experimental PDB structures capture crystal or cryo-EM coordinates under laboratory conditions. Click below to load the hosted Mol* viewer.'
-                      : 'AlphaFold DB models are computational predictions with per-residue pLDDT confidence. Treat low-confidence loops as unverified.'}
-                  </p>
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProvenanceMode('PDB');
-                        setMolstarLoaded(true);
-                      }}
-                      className="px-3.5 py-2 rounded-lg bg-[#29659B] hover:bg-[#1F507D] text-[#FCF9F4] text-xs font-semibold transition-colors"
-                    >
-                      Load PDB {rcsbId} in Mol*
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProvenanceMode('AlphaFold');
-                        setMolstarLoaded(true);
-                      }}
-                      className="px-3.5 py-2 rounded-lg bg-[#8E3E1C] hover:bg-[#733115] text-[#FCF9F4] text-xs font-semibold transition-colors"
-                    >
-                      Load AlphaFold {afId} in Mol*
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <iframe
-                  title={`${target.name} ${provenanceMode} 3D structure`}
-                  src={
-                    provenanceMode === 'PDB'
-                      ? `https://molstar.org/viewer/?pdb=${encodeURIComponent(rcsbId)}`
-                      : `https://molstar.org/viewer/?afdb=${encodeURIComponent(afId)}`
-                  }
-                  className="w-full flex-1 border-0"
-                />
-              )}
-              <div className="px-3 py-2 bg-[#FCF9F4] border-t border-[#D5C8B4] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-[#4F544C]">
-                <span>
-                  {provenanceMode === 'PDB'
-                    ? `Hosted Mol* · Experimental PDB ${rcsbId}`
-                    : `Hosted Mol* · AlphaFold-predicted ${afId}`}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setProvenanceMode('PDB');
-                      setMolstarLoaded(true);
-                    }}
-                    className={`px-2 py-0.5 rounded border ${
-                      provenanceMode === 'PDB'
-                        ? 'bg-[#E9F1F9] border-[#B3CDE5] text-[#1A4B7A] font-semibold'
-                        : 'border-[#D5C8B4]'
-                    }`}
-                  >
-                    PDB {rcsbId}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setProvenanceMode('AlphaFold');
-                      setMolstarLoaded(true);
-                    }}
-                    className={`px-2 py-0.5 rounded border ${
-                      provenanceMode === 'AlphaFold'
-                        ? 'bg-[#FDF5E3] border-[#E4C98C] text-[#875E0D] font-semibold'
-                        : 'border-[#D5C8B4]'
-                    }`}
-                  >
-                    AlphaFold {afId}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Bottom Dock inside Three.js 3D Viewport */}
-          {viewerMode === 'threejs' && (
+            {/* Bottom Dock inside Three.js 3D Viewport */}
             <div className="absolute bottom-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 bg-[#FCF9F4]/95 border border-[#D5C8B4] rounded-lg px-3 py-2">
               <div className="flex items-center gap-1.5">
                 <button
@@ -563,87 +478,113 @@ export function MechanismLens3D({
                 </button>
               </div>
             </div>
-          )}
-        </div>
-
-        {/* Mechanism & Residue Audit Side Panel */}
-        <div className="p-5 border-t lg:border-t-0 lg:border-l border-[#D5C8B4] bg-[#FCF9F4] space-y-4">
-          <div className="space-y-1">
-            <div className="text-xs font-mono text-[#29659B] font-semibold">CELLULAR LOCATION</div>
-            <p className="text-sm font-semibold text-[#1E221D]">{target.cellularOrganelle}</p>
-            <p className="text-xs text-[#4F544C] leading-relaxed">{target.compartmentSummary}</p>
           </div>
+        ) : (
+          <MolStarLiveViewer
+            target={target}
+            provenanceMode={provenanceMode}
+            onChangeProvenance={setProvenanceMode}
+            onSelectTarget={onSelectTarget}
+            selectedResidueLabel={activeResidue?.label}
+            residueFocusCounter={residueFocusCounter}
+          />
+        )}
 
-          <div className="organelle-subpanel rounded-lg p-3.5 space-y-2">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-[#8E3E1C] font-semibold">POCKET INTERACTION</span>
-              <span className="text-[#555A50]">{target.clashDistanceAngstrom}</span>
+        {/* Mechanism & Residue Audit Panel */}
+        <div
+          className={`p-5 bg-[#FCF9F4] ${
+            viewerMode === 'molstar'
+              ? 'border-t border-[#D5C8B4] grid lg:grid-cols-2 gap-6'
+              : 'border-t lg:border-t-0 lg:border-l border-[#D5C8B4] space-y-4'
+          }`}
+        >
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <div className="text-xs font-mono text-[#29659B] font-semibold">CELLULAR LOCATION</div>
+              <p className="text-sm font-semibold text-[#1E221D]">{target.cellularOrganelle}</p>
+              <p className="text-xs text-[#4F544C] leading-relaxed">{target.compartmentSummary}</p>
             </div>
-            <p className="text-sm text-[#1E221D] leading-relaxed">
-              {language === 'ta'
-                ? `${target.explanationSummary} (${target.clinicalImplication})`
-                : `${target.explanationSummary} ${target.clinicalImplication}`}
-            </p>
-          </div>
 
-          {/* Clickable Residues */}
-          <div className="space-y-2">
-            <div className="text-xs font-mono text-[#555A50]">CATALYTIC POCKET RESIDUES (CLICK TO INSPECT)</div>
-            <div className="flex flex-wrap gap-1.5">
-              {target.residues.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  onClick={() => setSelectedResidueId(r.id)}
-                  className={`px-2.5 py-1 text-xs font-mono rounded-md border transition-colors ${
-                    r.id === activeResidue?.id
-                      ? 'bg-[#F2ECF8] border-[#B49ED1] text-[#4E3470] font-semibold'
-                      : 'bg-[#F5EFE5] border-[#D5C8B4] text-[#3C4138] hover:border-[#B8A68B]'
-                  }`}
-                >
-                  {r.label}
-                </button>
-              ))}
-            </div>
-            {activeResidue && (
-              <div className="text-xs text-[#3C4138] bg-[#EFE7DA] border border-[#D5C8B4] rounded-lg p-2.5 flex items-start gap-2">
-                <Info className="w-3.5 h-3.5 text-[#74559C] shrink-0 mt-0.5" />
-                <span>
-                  <strong className="text-[#1E221D] font-mono">{activeResidue.label}:</strong>{' '}
-                  {activeResidue.role}
-                </span>
+            <div className="organelle-subpanel rounded-lg p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <span className="text-[#8E3E1C] font-semibold">POCKET INTERACTION</span>
+                <span className="text-[#555A50]">{target.clashDistanceAngstrom}</span>
               </div>
-            )}
+              <p className="text-sm text-[#1E221D] leading-relaxed">
+                {language === 'ta'
+                  ? `${target.explanationSummary} (${target.clinicalImplication})`
+                  : `${target.explanationSummary} ${target.clinicalImplication}`}
+              </p>
+            </div>
           </div>
 
-          {/* External Primary Structure & FDA Label Links */}
-          <div className="pt-3 border-t border-[#D5C8B4] flex flex-wrap items-center gap-3 text-xs">
-            <a
-              href={target.rcsbStructureUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[#29659B] hover:underline font-medium"
-            >
-              RCSB PDB {rcsbId} <ExternalLink className="w-3 h-3" />
-            </a>
-            <a
-              href={target.alphafoldViewerUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[#8E3E1C] hover:underline font-medium"
-            >
-              Mol* AlphaFold DB {afId} <ExternalLink className="w-3 h-3" />
-            </a>
-            {target.dailymedUrl && (
+          <div className="space-y-4 flex flex-col justify-between">
+            {/* Clickable Residues */}
+            <div className="space-y-2">
+              <div className="text-xs font-mono text-[#555A50]">
+                {viewerMode === 'molstar'
+                  ? 'CATALYTIC POCKET RESIDUES (CLICK TO FOCUS IN MOL*)'
+                  : 'CATALYTIC POCKET RESIDUES (CLICK TO INSPECT)'}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {target.residues.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedResidueId(r.id);
+                      setResidueFocusCounter((c) => c + 1);
+                    }}
+                    className={`px-2.5 py-1 text-xs font-mono rounded-md border transition-colors ${
+                      r.id === activeResidue?.id
+                        ? 'bg-[#F2ECF8] border-[#B49ED1] text-[#4E3470] font-semibold'
+                        : 'bg-[#F5EFE5] border-[#D5C8B4] text-[#3C4138] hover:border-[#B8A68B]'
+                    }`}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+              {activeResidue && (
+                <div className="text-xs text-[#3C4138] bg-[#EFE7DA] border border-[#D5C8B4] rounded-lg p-2.5 flex items-start gap-2">
+                  <Info className="w-3.5 h-3.5 text-[#74559C] shrink-0 mt-0.5" />
+                  <span>
+                    <strong className="text-[#1E221D] font-mono">{activeResidue.label}:</strong>{' '}
+                    {activeResidue.role}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* External Primary Structure & FDA Label Links */}
+            <div className="pt-3 border-t border-[#D5C8B4] flex flex-wrap items-center gap-3 text-xs">
               <a
-                href={target.dailymedUrl}
+                href={target.rcsbStructureUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 text-[#556B22] hover:underline font-medium"
+                className="inline-flex items-center gap-1 text-[#29659B] hover:underline font-medium"
               >
-                FDA DailyMed Label <ExternalLink className="w-3 h-3" />
+                RCSB PDB {rcsbId} <ExternalLink className="w-3 h-3" />
               </a>
-            )}
+              <a
+                href={target.alphafoldViewerUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[#8E3E1C] hover:underline font-medium"
+              >
+                Mol* AlphaFold DB {afId} <ExternalLink className="w-3 h-3" />
+              </a>
+              {target.dailymedUrl && (
+                <a
+                  href={target.dailymedUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-[#556B22] hover:underline font-medium"
+                >
+                  FDA DailyMed Label <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
           </div>
         </div>
       </div>

@@ -137,6 +137,252 @@ async function startServer() {
     res.json({ ok: true, service: 'medguard-api' });
   });
 
+  // Live Molecular Structure Metadata & Proxy (RCSB PDB & AlphaFold DB for Mol* Live DB)
+  interface CachedAlphaFoldMeta {
+    modelEntityId: string;
+    latestVersion: number;
+    globalPlddt: number | null;
+    fractionVeryHigh: number | null;
+    fractionConfident: number | null;
+    fractionLow: number | null;
+    fractionVeryLow: number | null;
+    sequenceLength: number | null;
+    organism: string | null;
+    description: string | null;
+    paeImageUrl: string | null;
+    bcifUrl: string | null;
+    cifUrl: string | null;
+  }
+
+  interface CachedPdbMeta {
+    title: string | null;
+    method: string | null;
+    resolutionAngstrom: number | null;
+    releaseDate: string | null;
+    polymerChains: number | null;
+    ligands: string[];
+  }
+
+  const structureMetaCache = new Map<
+    string,
+    { fetchedAt: number; pdb: CachedPdbMeta | null; alphafold: CachedAlphaFoldMeta | null }
+  >();
+  const structureFileCache = new Map<
+    string,
+    { fetchedAt: number; buffer: Buffer; contentType: string; isBinary: boolean; format: 'mmcif' }
+  >();
+  const STRUCTURE_HEADERS = {
+    'User-Agent':
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    Accept: 'application/json, application/octet-stream, chemical/x-cif, text/plain, */*',
+  };
+
+  async function fetchAlphaFoldMeta(afId: string): Promise<CachedAlphaFoldMeta | null> {
+    try {
+      const resp = await withTimeout(
+        fetch(`https://alphafold.ebi.ac.uk/api/prediction/${encodeURIComponent(afId)}`, {
+          headers: STRUCTURE_HEADERS,
+        }),
+        9000,
+        `AlphaFold API (${afId})`
+      );
+      if (!resp.ok) return null;
+      const arr = (await resp.json()) as Array<Record<string, unknown>>;
+      const entry = Array.isArray(arr) ? arr[0] : null;
+      if (!entry) return null;
+      return {
+        modelEntityId: String(entry.modelEntityId || `AF-${afId}-F1`),
+        latestVersion: Number(entry.latestVersion || 6),
+        globalPlddt:
+          typeof entry.globalMetricValue === 'number' ? entry.globalMetricValue : null,
+        fractionVeryHigh:
+          typeof entry.fractionPlddtVeryHigh === 'number' ? entry.fractionPlddtVeryHigh : null,
+        fractionConfident:
+          typeof entry.fractionPlddtConfident === 'number' ? entry.fractionPlddtConfident : null,
+        fractionLow:
+          typeof entry.fractionPlddtLow === 'number' ? entry.fractionPlddtLow : null,
+        fractionVeryLow:
+          typeof entry.fractionPlddtVeryLow === 'number' ? entry.fractionPlddtVeryLow : null,
+        sequenceLength: typeof entry.sequenceEnd === 'number' ? entry.sequenceEnd : null,
+        organism:
+          typeof entry.organismScientificName === 'string' ? entry.organismScientificName : null,
+        description:
+          typeof entry.uniprotDescription === 'string' ? entry.uniprotDescription : null,
+        paeImageUrl: typeof entry.paeImageUrl === 'string' ? entry.paeImageUrl : null,
+        bcifUrl: typeof entry.bcifUrl === 'string' ? entry.bcifUrl : null,
+        cifUrl: typeof entry.cifUrl === 'string' ? entry.cifUrl : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function fetchPdbMeta(rcsbId: string): Promise<CachedPdbMeta | null> {
+    try {
+      const resp = await withTimeout(
+        fetch(`https://data.rcsb.org/rest/v1/core/entry/${encodeURIComponent(rcsbId)}`, {
+          headers: STRUCTURE_HEADERS,
+        }),
+        9000,
+        `RCSB API (${rcsbId})`
+      );
+      if (!resp.ok) return null;
+      const d = (await resp.json()) as {
+        struct?: { title?: string };
+        exptl?: Array<{ method?: string }>;
+        rcsb_entry_info?: {
+          resolution_combined?: number[];
+          deposited_polymer_entity_instance_count?: number;
+          nonpolymer_bound_components?: string[];
+        };
+        rcsb_accession_info?: { initial_release_date?: string };
+      };
+      return {
+        title: d.struct?.title ?? null,
+        method: d.exptl?.[0]?.method ?? null,
+        resolutionAngstrom: d.rcsb_entry_info?.resolution_combined?.[0] ?? null,
+        releaseDate: d.rcsb_accession_info?.initial_release_date?.slice(0, 10) ?? null,
+        polymerChains: d.rcsb_entry_info?.deposited_polymer_entity_instance_count ?? null,
+        ligands: Array.isArray(d.rcsb_entry_info?.nonpolymer_bound_components)
+          ? d.rcsb_entry_info.nonpolymer_bound_components
+          : [],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  app.get('/api/structure/metadata/:targetId', async (req, res) => {
+    const targetId = String(req.params.targetId || '').toUpperCase() as MechanismTargetId;
+    const target = MECHANISM_TARGETS[targetId];
+    if (!target) {
+      return res.status(404).json({ error: `Unknown mechanism target "${req.params.targetId}".` });
+    }
+    const rcsbId = target.structureId.match(/PDB\s+([A-Z0-9]{4})/i)?.[1]?.toUpperCase() ?? '1TQN';
+    const afId = target.gene.match(/UniProt\s+([A-Z0-9]+)/i)?.[1]?.toUpperCase() ?? 'P08684';
+
+    const cached = structureMetaCache.get(targetId);
+    const now = Date.now();
+    if (cached && now - cached.fetchedAt < 1000 * 60 * 30) {
+      return res.json({
+        targetId,
+        rcsbId,
+        afId,
+        pdb: cached.pdb,
+        alphafold: cached.alphafold,
+        pdbFileUrl: `/api/structure/file?source=pdb&id=${encodeURIComponent(rcsbId)}`,
+        afdbFileUrl: `/api/structure/file?source=afdb&id=${encodeURIComponent(afId)}`,
+      });
+    }
+
+    const [pdb, alphafold] = await Promise.all([fetchPdbMeta(rcsbId), fetchAlphaFoldMeta(afId)]);
+    structureMetaCache.set(targetId, { fetchedAt: now, pdb, alphafold });
+
+    return res.json({
+      targetId,
+      rcsbId,
+      afId,
+      pdb,
+      alphafold,
+      pdbFileUrl: `/api/structure/file?source=pdb&id=${encodeURIComponent(rcsbId)}`,
+      afdbFileUrl: `/api/structure/file?source=afdb&id=${encodeURIComponent(afId)}`,
+    });
+  });
+
+  app.get('/api/structure/file', async (req, res) => {
+    const source = req.query.source === 'afdb' ? 'afdb' : req.query.source === 'pdb' ? 'pdb' : null;
+    const rawId = String(req.query.id || '').trim().toUpperCase();
+    if (!source || !/^[A-Z0-9_-]{3,24}$/.test(rawId)) {
+      return res.status(400).json({ error: 'Valid source (pdb|afdb) and structure id are required.' });
+    }
+
+    const cacheKey = `${source}:${rawId}`;
+    const cached = structureFileCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < 1000 * 60 * 60) {
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('X-Structure-Format', cached.format);
+      res.setHeader('X-Structure-Binary', cached.isBinary ? 'true' : 'false');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.send(cached.buffer);
+    }
+
+    const candidateUrls: Array<{ url: string; isBinary: boolean; contentType: string }> = [];
+    if (source === 'pdb') {
+      candidateUrls.push(
+        {
+          url: `https://models.rcsb.org/${encodeURIComponent(rawId)}.bcif`,
+          isBinary: true,
+          contentType: 'application/octet-stream',
+        },
+        {
+          url: `https://files.rcsb.org/download/${encodeURIComponent(rawId)}.cif`,
+          isBinary: false,
+          contentType: 'chemical/x-cif; charset=utf-8',
+        }
+      );
+    } else {
+      const afMeta = await fetchAlphaFoldMeta(rawId);
+      if (afMeta?.bcifUrl) {
+        candidateUrls.push({
+          url: afMeta.bcifUrl,
+          isBinary: true,
+          contentType: 'application/octet-stream',
+        });
+      }
+      if (afMeta?.cifUrl) {
+        candidateUrls.push({
+          url: afMeta.cifUrl,
+          isBinary: false,
+          contentType: 'chemical/x-cif; charset=utf-8',
+        });
+      }
+      const ver = afMeta?.latestVersion ?? 6;
+      candidateUrls.push({
+        url: `https://alphafold.ebi.ac.uk/files/AF-${encodeURIComponent(rawId)}-F1-model_v${ver}.cif`,
+        isBinary: false,
+        contentType: 'chemical/x-cif; charset=utf-8',
+      });
+    }
+
+    for (const candidate of candidateUrls) {
+      try {
+        const upstream = await withTimeout(
+          fetch(candidate.url, { headers: STRUCTURE_HEADERS }),
+          15000,
+          `Structure fetch (${candidate.url})`
+        );
+        if (!upstream.ok) continue;
+        const arrBuf = await upstream.arrayBuffer();
+        const buf = Buffer.from(arrBuf);
+        if (buf.length < 128) continue;
+
+        if (structureFileCache.size > 24) {
+          const oldestKey = structureFileCache.keys().next().value;
+          if (oldestKey) structureFileCache.delete(oldestKey);
+        }
+        structureFileCache.set(cacheKey, {
+          fetchedAt: Date.now(),
+          buffer: buf,
+          contentType: candidate.contentType,
+          isBinary: candidate.isBinary,
+          format: 'mmcif',
+        });
+
+        res.setHeader('Content-Type', candidate.contentType);
+        res.setHeader('X-Structure-Format', 'mmcif');
+        res.setHeader('X-Structure-Binary', candidate.isBinary ? 'true' : 'false');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(buf);
+      } catch {
+        // Try next candidate
+      }
+    }
+
+    return res.status(502).json({
+      error: `Unable to fetch live 3D structure data for ${source.toUpperCase()} ${rawId}.`,
+    });
+  });
+
   // 1. Document, Image OCR & Structured Prescription Translation (AI reads & translates ONLY; never invents clinical alerts)
   app.post('/api/prescription/ocr-parse', async (req, res) => {
     const body = req.body as {
